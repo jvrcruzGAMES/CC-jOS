@@ -19,7 +19,7 @@ wget run https://raw.githubusercontent.com/jvrcruzGAMES/CC-jOS/main/installer.lu
 ```
 +-------------------------------------------------------------------+
 |                        Userspace (.app Bundles)                   |
-|   /System/Apps/Init.app  |  Future Sysmodules (FS.app, Net.app)   |
+|   /System/Apps/Launcher.app (qLaunch)  |  /System/Apps/Dino.app   |
 +-------------------------------------------------------------------+
                  |                                 |
                  | require("jvk")                  |
@@ -34,7 +34,7 @@ wget run https://raw.githubusercontent.com/jvrcruzGAMES/CC-jOS/main/installer.lu
                  v                                 v
 +-------------------------------------------------------------------+
 |              Kernel (/System/Kernel/kernel.lua + .sig)            |
-|  - Coroutine Process Scheduler & IPC Bus                          |
+|  - Coroutine Process Scheduler, Event Bus & IPC                   |
 |  - Framebuffer Syscall Abstraction (fb.info, fb.submitBatch, ...) |
 |  - Strict RSA-SHA256 .app Bundle & Signed System Library Loader   |
 |  - Capability Permission Enforcer (User App vs Sysmodule Tiers)   |
@@ -52,7 +52,7 @@ wget run https://raw.githubusercontent.com/jvrcruzGAMES/CC-jOS/main/installer.lu
 +-------------------------------------------------------------------+
 |                     BIOS (/startup.lua)                           |
 |  - Immutable After Install (FS Write/Delete/Move Protection)      |
-|  - Low-Level Scanline Framebuffer (BIOS.fb)                       |
+|  - Pixelwise 2x3 Teletext Sub-pixel Framebuffer (BIOS.fb)         |
 |  - Renders Hardcoded Centered White "J" Boot Splash Screen        |
 |  - Embedded RSA-512 / SHA-256 Root Certificate Authority          |
 +-------------------------------------------------------------------+
@@ -74,19 +74,29 @@ wget run https://raw.githubusercontent.com/jvrcruzGAMES/CC-jOS/main/installer.lu
 
 ### 4. `libjvk` (`jvk`) — Bundled Vulkan-Style 2D & 3D Graphics Library
 - Located at `/System/Libraries/jvk.lua` (signed by `/System/Libraries/jvk.lua.sig`).
-- Provides a `libvulkan`-inspired pipeline (`VkInstance`, `VkPhysicalDevice`, `VkDevice`, `VkQueue`, `VkSwapchainKHR`, `VkRenderPass`, `VkPipeline`, `VkCommandBuffer`) for building 2D UIs (`uiWindow`, `uiPanel`, `uiLabel`, `uiButton`, `uiProgressBar`) and 3D depth-buffered scenes (`vec3`, `mat4`, `mesh.cube`, `mesh.pyramid`, `drawMesh`, `uiViewport3D`).
+- Provides a `libvulkan`-inspired pipeline (`VkInstance`, `VkPhysicalDevice`, `VkDevice`, `VkQueue`, `VkSwapchainKHR`, `VkRenderPass`, `VkPipeline`, `VkCommandBuffer`) for building pixelwise 2D UIs (`uiWindow`, `uiPanel`, `uiLabel`, `uiButton`, `uiProgressBar`) and 3D depth-buffered scenes (`vec3`, `mat4`, `mesh.cube`, `mesh.pyramid`, `drawMesh`, `uiViewport3D`).
 - **Full Documentation**: See **[docs/jvk.md](docs/jvk.md)**.
+
+### 5. Bundled Userspace `.app` Bundles
+- **`Launcher.app` (`/System/Apps/Launcher.app`)**:
+  - Nintendo Switch **qLaunch**-style Home Menu launched by the Kernel on boot.
+  - Displays installed `.app` bundles in a centered horizontal row of square tiles with a pulsing cyan selection border.
+  - **Controls (WASD)**: `A` / `D` to move between app squares, `W` (or `Space` / `Enter`) to launch the selected app.
+- **`Dino.app` (`/System/Apps/Dino.app`)**:
+  - Recreation of Google Chrome's **Dino** game rendered pixelwise (`102 × 57` sub-pixels) via `libjvk`.
+  - Features animated T-Rex running, jumping, and ducking sprites, cacti & flapping pterodactyl obstacles, scrolling clouds & desert horizon, and high-score tracking.
+  - **Controls (WASD)**: `W` / `Space` to jump (or retry on Game Over), `S` to duck / fast-fall, `A` / `D` to adjust horizontal position, `Q` to quit back to `Launcher.app`.
 
 ---
 
 ## Signing & Verification Tooling
 
 ```bash
-# Sign bootloader, kernel, libjvk, and all default .app bundles
+# Sign bootloader, kernel, libjvk, Launcher.app, and Dino.app
 lua tools/jos-sign.lua sign-all
 
 # Sign a specific .app bundle
-lua tools/jos-sign.lua sign-app System/Apps/Init.app
+lua tools/jos-sign.lua sign-app System/Apps/Dino.app
 
 # Sign a standalone system binary or library
 lua tools/jos-sign.lua sign-file System/Libraries/jvk.lua

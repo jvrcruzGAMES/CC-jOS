@@ -8,18 +8,21 @@ local args = { ... }
 local REPO_BASE = "https://raw.githubusercontent.com/jvrcruzGAMES/CC-jOS/main"
 
 local MANIFEST_FILES = {
-    { remote = "boot/boot.cfg",                        target = "/boot/boot.cfg" },
-    { remote = "boot/bootloader.lua",                  target = "/boot/bootloader.lua" },
-    { remote = "boot/bootloader.lua.sig",              target = "/boot/bootloader.lua.sig" },
-    { remote = "System/Kernel/kernel.lua",             target = "/System/Kernel/kernel.lua" },
-    { remote = "System/Kernel/kernel.lua.sig",         target = "/System/Kernel/kernel.lua.sig" },
-    { remote = "System/Libraries/jvk.lua",             target = "/System/Libraries/jvk.lua" },
-    { remote = "System/Libraries/jvk.lua.sig",         target = "/System/Libraries/jvk.lua.sig" },
-    { remote = "System/Apps/Init.app/manifest.lua",    target = "/System/Apps/Init.app/manifest.lua" },
-    { remote = "System/Apps/Init.app/main.lua",        target = "/System/Apps/Init.app/main.lua" },
-    { remote = "System/Apps/Init.app/signature.sig",   target = "/System/Apps/Init.app/signature.sig" },
+    { remote = "boot/boot.cfg",                            target = "/boot/boot.cfg" },
+    { remote = "boot/bootloader.lua",                      target = "/boot/bootloader.lua" },
+    { remote = "boot/bootloader.lua.sig",                  target = "/boot/bootloader.lua.sig" },
+    { remote = "System/Kernel/kernel.lua",                 target = "/System/Kernel/kernel.lua" },
+    { remote = "System/Kernel/kernel.lua.sig",             target = "/System/Kernel/kernel.lua.sig" },
+    { remote = "System/Libraries/jvk.lua",                 target = "/System/Libraries/jvk.lua" },
+    { remote = "System/Libraries/jvk.lua.sig",             target = "/System/Libraries/jvk.lua.sig" },
+    { remote = "System/Apps/Launcher.app/manifest.lua",    target = "/System/Apps/Launcher.app/manifest.lua" },
+    { remote = "System/Apps/Launcher.app/main.lua",        target = "/System/Apps/Launcher.app/main.lua" },
+    { remote = "System/Apps/Launcher.app/signature.sig",   target = "/System/Apps/Launcher.app/signature.sig" },
+    { remote = "System/Apps/Dino.app/manifest.lua",        target = "/System/Apps/Dino.app/manifest.lua" },
+    { remote = "System/Apps/Dino.app/main.lua",            target = "/System/Apps/Dino.app/main.lua" },
+    { remote = "System/Apps/Dino.app/signature.sig",       target = "/System/Apps/Dino.app/signature.sig" },
     -- Install BIOS (startup.lua) last as the immutable root of trust
-    { remote = "startup.lua",                          target = "/startup.lua" }
+    { remote = "startup.lua",                              target = "/startup.lua" }
 }
 
 local function setColor(col)
@@ -91,6 +94,11 @@ end
 -- Create staging/update directory for future bootloader updates
 if not fs.exists("/boot/update") then
     fs.makeDir("/boot/update")
+end
+
+-- Clean up legacy Init.app if present from an older install
+if fs.exists("/System/Apps/Init.app") then
+    fs.delete("/System/Apps/Init.app")
 end
 
 -- First download all files into memory so a partial network failure never leaves a half-installed system

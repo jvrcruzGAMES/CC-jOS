@@ -25,6 +25,7 @@ local rawFS = cloneTable(_G.fs)
 local rawTerm = cloneTable(_G.term)
 local rawHTTP = cloneTable(_G.http)
 local rawColors = cloneTable(_G.colors or _G.colours)
+local rawKeys = cloneTable(_G.keys)
 
 -- ============================================================================
 -- 1. Embedded Root of Trust (RSA-512 / SHA-256 Public Key)
@@ -1133,7 +1134,8 @@ local rawHW = {
         _testMode = rawOS._testMode
     },
     http = rawHTTP,
-    colors = rawColors
+    colors = rawColors,
+    keys = rawKeys
 }
 
 -- ============================================================================

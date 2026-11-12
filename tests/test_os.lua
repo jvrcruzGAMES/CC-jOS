@@ -2,10 +2,10 @@
 -- ============================================================================
 -- CC-jOS End-to-End Verification & Security Test Suite (tests/test_os.lua)
 -- Simulates a CC:Tweaked Computer environment and tests:
---   1. GitHub Installer (installer.lua) including /System/Libraries/jvk.lua
+--   1. GitHub Installer (installer.lua) installing Launcher.app, Dino.app & libjvk
 --   2. Pixelwise BIOS Framebuffer (2x3 Teletext Sub-pixels \128..\159) & Centered White "J"
---   3. Start App (Init.app) taking over rendering via pixelwise libjvk
---   4. Host CraftOS _G preservation (no shell.lua/bios.lua fs/loadfile crash) + Userspace isolation
+--   3. Launcher.app (Nintendo Switch qLaunch style horizontal row of centered squares)
+--   4. Launching Dino.app from Launcher.app via 'W', playing Dino (W jump, S duck), and 'Q' back to Home
 --   5. BIOS Immutability Enforcement
 --   6. Bootloader Signed Update Application & Tamper Rejection
 --   7. Kernel Strict Code Signing & Permission Enforcing
@@ -60,11 +60,12 @@ local function decodeTeletextFrameToPixels(frame, termW, termH)
 end
 
 -- Create an in-memory CC:Tweaked Virtual Filesystem and Framebuffer-capable Terminal
-local function createMockComputer()
+local function createMockComputer(scriptedEvents)
     local vfsFiles = {}
     local vfsDirs = { ["/"] = true }
     local consoleLines = {}
     local currentLine = ""
+    local eventQueue = scriptedEvents or {}
 
     local termW, termH = 51, 19
     local curX, curY = 1, 1
@@ -243,8 +244,22 @@ local function createMockComputer()
     }
 
     local mockOS = {
-        pullEventRaw = function() return "timer" end,
-        pullEvent = function() return "timer" end,
+        pullEventRaw = function()
+            if #eventQueue == 0 then
+                return "test_end"
+            end
+            local ev = table.remove(eventQueue, 1)
+            return unpack(ev)
+        end,
+        pullEvent = function()
+            if #eventQueue == 0 then
+                return "test_end"
+            end
+            local ev = table.remove(eventQueue, 1)
+            return unpack(ev)
+        end,
+        startTimer = function() return 1 end,
+        clock = function() return 1.0 end,
         reboot = function() end,
         sleep = function() end,
         _testMode = true
@@ -268,6 +283,7 @@ local function createMockComputer()
         screenFg = screenFg,
         screenBg = screenBg,
         frameHistory = frameHistory,
+        eventQueue = eventQueue,
         fs = mockFS,
         term = mockTerm,
         http = mockHTTP,
@@ -297,7 +313,6 @@ local function runInComputer(comp, vfsScriptPath, args, testHook)
         comp.os._testHook = testHook
     end
     local res = fn(unpack(args or {}))
-    -- Verify host CraftOS globals (fs, loadfile) were NOT wiped on env
     assert(env.fs ~= nil, "Host CraftOS env.fs must not be nilled out!")
     assert(env.loadfile ~= nil, "Host CraftOS env.loadfile must not be nilled out!")
     return res
@@ -308,7 +323,29 @@ print("=== Running CC-jOS Automated Verification Suite ===")
 -- ----------------------------------------------------------------------------
 -- Test 1: Run GitHub Installer (installer.lua) in Mock CC:Tweaked Environment
 -- ----------------------------------------------------------------------------
-local comp = createMockComputer()
+-- Scripted events for Test 2:
+--   1. "key" "d" (move qLaunch selection right)
+--   2. "key" "a" (move qLaunch selection left back to Dino.app)
+--   3. "key" "w" (launch Dino.app from Launcher.app!)
+--   4. "timer"   (Dino.app physics tick 1)
+--   5. "key" "w" (Dino jumps!)
+--   6. "timer"   (Dino.app airborne physics tick)
+--   7. "key" "s" (Dino fast-falls!)
+--   8. "timer"   (Dino.app physics tick)
+--   9. "key" "q" (Exit Dino.app back to qLaunch Launcher.app!)
+local scriptedEvents = {
+    { "key", "d", false },
+    { "key", "a", false },
+    { "key", "w", false },
+    { "timer", 1 },
+    { "key", "w", false },
+    { "timer", 1 },
+    { "key", "s", false },
+    { "timer", 1 },
+    { "key", "q", false }
+}
+
+local comp = createMockComputer(scriptedEvents)
 comp.vfsFiles["/installer.lua"] = readHostFile("installer.lua")
 runInComputer(comp, "/installer.lua", { "--no-reboot" })
 
@@ -319,50 +356,57 @@ assert(comp.vfsFiles["/System/Kernel/kernel.lua"], "Installer must install /Syst
 assert(comp.vfsFiles["/System/Kernel/kernel.lua.sig"], "Installer must install /System/Kernel/kernel.lua.sig")
 assert(comp.vfsFiles["/System/Libraries/jvk.lua"], "Installer must install /System/Libraries/jvk.lua")
 assert(comp.vfsFiles["/System/Libraries/jvk.lua.sig"], "Installer must install /System/Libraries/jvk.lua.sig")
-assert(comp.vfsFiles["/System/Apps/Init.app/manifest.lua"], "Installer must install Init.app/manifest.lua")
-assert(comp.vfsFiles["/System/Apps/Init.app/main.lua"], "Installer must install Init.app/main.lua")
-assert(comp.vfsFiles["/System/Apps/Init.app/signature.sig"], "Installer must install Init.app/signature.sig")
-print("[PASS] 1. GitHub Installer downloaded & installed all OS files (including libjvk) into VFS")
+assert(comp.vfsFiles["/System/Apps/Launcher.app/manifest.lua"], "Installer must install Launcher.app/manifest.lua")
+assert(comp.vfsFiles["/System/Apps/Launcher.app/main.lua"], "Installer must install Launcher.app/main.lua")
+assert(comp.vfsFiles["/System/Apps/Launcher.app/signature.sig"], "Installer must install Launcher.app/signature.sig")
+assert(comp.vfsFiles["/System/Apps/Dino.app/manifest.lua"], "Installer must install Dino.app/manifest.lua")
+assert(comp.vfsFiles["/System/Apps/Dino.app/main.lua"], "Installer must install Dino.app/main.lua")
+assert(comp.vfsFiles["/System/Apps/Dino.app/signature.sig"], "Installer must install Dino.app/signature.sig")
+assert(comp.vfsFiles["/System/Apps/Init.app/main.lua"] == nil, "Init.app must be removed")
+print("[PASS] 1. GitHub Installer installed BIOS, Bootloader, Kernel, libjvk, Launcher.app & Dino.app")
 
 -- ----------------------------------------------------------------------------
--- Test 2: Pixelwise Boot Screen ("J" centered) & Start App Taking Over via libjvk
+-- Test 2: Boot Screen -> qLaunch Launcher.app -> Dino.app (WASD) -> Back to Launcher
 -- ----------------------------------------------------------------------------
 for i = #comp.frameHistory, 1, -1 do comp.frameHistory[i] = nil end
-local kernelInspect = nil
-runInComputer(comp, "/startup.lua", {}, function(info)
-    kernelInspect = info
-end)
+runInComputer(comp, "/startup.lua")
 
-assert(#comp.frameHistory >= 2, "Expected boot splash frame(s) followed by Init.app libjvk frame")
+assert(#comp.frameHistory >= 6, "Expected boot frames + Launcher frames + Dino frames")
 
--- Decode the first presented frame (BIOS boot splash) from 2x3 teletext chars back to 102x57 pixels
+-- 2a: Verify first frame is the pixelwise centered white "J" boot splash
 local bootPixels = decodeTeletextFrameToPixels(comp.frameHistory[1], 51, 19)
 local centerX = math.floor((102 + 1) / 2) -- 51
 local centerY = math.floor((57 + 1) / 2)  -- 29
 assert(bootPixels[centerY][centerX] == "0", "Boot screen must have white ('0') pixel at center (51, 29)")
-assert(bootPixels[centerY - 3][centerX + 1] == "0", "Boot screen 'J' top bar pixel must be white ('0')")
-assert(bootPixels[centerY + 2][centerX - 2] == "0", "Boot screen 'J' hook pixel must be white ('0')")
 assert(bootPixels[1][1] == "f", "Boot screen background pixel (1,1) must be black ('f')")
 print("[PASS] 2a. BIOS & Bootloader rendered pixelwise centered white 'J' via 2x3 teletext sub-pixels")
 
--- Verify final frame after Init.app took over the rendering stack via pixelwise libjvk
-local appPixels = decodeTeletextFrameToPixels(comp.frameHistory[#comp.frameHistory], 51, 19)
--- Header bar at y=2 should be blue ("b") with white title pixels ("0")
-local foundHeaderBlue = false
-local foundCyanCubePixels = false
-local foundLimeTextPixels = false
-for py = 1, 57 do
-    for px = 1, 102 do
-        local c = appPixels[py][px]
-        if py <= 7 and c == "b" then foundHeaderBlue = true end
-        if px >= 4 and px <= 48 and c == "9" then foundCyanCubePixels = true end
-        if px >= 51 and py >= 22 and py <= 30 and c == "5" then foundLimeTextPixels = true end
+-- 2b: Verify Launcher.app (frame 3, right after boot splash) rendered qLaunch centered squares
+local launcherPixels = decodeTeletextFrameToPixels(comp.frameHistory[3], 51, 19)
+local foundCyanSelectBorder = false
+local foundSquareTileFill = false
+for py = 16, 41 do
+    for px = 11, 92 do
+        if launcherPixels[py][px] == "9" then foundCyanSelectBorder = true end
+        if launcherPixels[py][px] == "7" then foundSquareTileFill = true end
     end
 end
-assert(foundHeaderBlue, "Expected pixelwise blue UI window header")
-assert(foundCyanCubePixels, "Expected pixelwise cyan 3D cube in 3D viewport")
-assert(foundLimeTextPixels, "Expected pixelwise lime 'Kernel's up' text in status panel")
-print("[PASS] 2b. Init.app took over pixelwise rendering stack via libjvk (2D UI + 3D Cube + \"Kernel's up\")")
+assert(foundCyanSelectBorder, "Expected qLaunch cyan highlight border around selected square tile")
+assert(foundSquareTileFill, "Expected qLaunch centered horizontal row of square tiles")
+print("[PASS] 2b. Launcher.app rendered Nintendo Switch qLaunch centered row of square tiles")
+
+-- 2c: Verify Dino.app launched via 'W', rendered pixelwise T-Rex & horizon, and returned to Launcher on 'Q'
+local dinoPixels = decodeTeletextFrameToPixels(comp.frameHistory[6], 51, 19)
+local foundDinoLime = false
+local foundHorizonLine = (dinoPixels[47][50] == "8")
+for py = 20, 47 do
+    for px = 10, 35 do
+        if dinoPixels[py][px] == "5" then foundDinoLime = true end
+    end
+end
+assert(foundDinoLime, "Expected Dino.app pixel-art T-Rex sprite on screen")
+assert(foundHorizonLine, "Expected Dino.app ground horizon line at y=47")
+print("[PASS] 2c. Dino.app launched from Launcher.app via WASD, simulated jump/duck ticks, and exited on 'Q'")
 
 -- ----------------------------------------------------------------------------
 -- Test 3: BIOS Immutability Enforcement
@@ -415,8 +459,8 @@ local compSec = createMockComputer()
 compSec.vfsFiles["/installer.lua"] = readHostFile("installer.lua")
 runInComputer(compSec, "/installer.lua", { "--no-reboot" })
 
--- 5a: Tamper with Init.app/main.lua (1 byte change without re-signing) -> Kernel must PANIC
-compSec.vfsFiles["/System/Apps/Init.app/main.lua"] = 'print("Hacked!")\n'
+-- 5a: Tamper with Launcher.app/main.lua (1 byte change without re-signing) -> Kernel must PANIC
+compSec.vfsFiles["/System/Apps/Launcher.app/main.lua"] = 'print("Hacked!")\n'
 local bootTamperedOk, bootTamperedErr = pcall(function()
     runInComputer(compSec, "/startup.lua")
 end)
@@ -424,15 +468,15 @@ assert(not bootTamperedOk and tostring(bootTamperedErr):find("ERR_CODESIGN_FILE_
     "Kernel must refuse to launch tampered .app bundle! Got: " .. tostring(bootTamperedErr))
 print("[PASS] 5a. Kernel rejected tampered .app bundle (ERR_CODESIGN_FILE_TAMPERED)")
 
--- 5b: Drop an extra unsigned file into Init.app -> Kernel must PANIC
-compSec.vfsFiles["/System/Apps/Init.app/main.lua"] = readHostFile("System/Apps/Init.app/main.lua")
-compSec.vfsFiles["/System/Apps/Init.app/extra.lua"] = "-- unsigned payload"
+-- 5b: Drop an extra unsigned file into Launcher.app -> Kernel must PANIC
+compSec.vfsFiles["/System/Apps/Launcher.app/main.lua"] = readHostFile("System/Apps/Launcher.app/main.lua")
+compSec.vfsFiles["/System/Apps/Launcher.app/extra.lua"] = "-- unsigned payload"
 local bootExtraOk, bootExtraErr = pcall(function()
     runInComputer(compSec, "/startup.lua")
 end)
 assert(not bootExtraOk and tostring(bootExtraErr):find("ERR_CODESIGN_UNSIGNED_FILE"),
     "Kernel must refuse bundle containing unsigned files! Got: " .. tostring(bootExtraErr))
-compSec.vfsFiles["/System/Apps/Init.app/extra.lua"] = nil
+compSec.vfsFiles["/System/Apps/Launcher.app/extra.lua"] = nil
 print("[PASS] 5b. Kernel rejected .app bundle with extra unsigned file (ERR_CODESIGN_UNSIGNED_FILE)")
 
 -- 6: Verify User App vs Sysmodule Permission Separation

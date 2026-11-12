@@ -8,19 +8,47 @@ if not BIOS or not rawHW then
     error("KERNEL_PANIC: Kernel must be booted by CC-jOS Bootloader", 0)
 end
 
-local KERNEL_VERSION = "1.1.0-micro"
+local KERNEL_VERSION = "1.2.0-micro"
 local fs = rawHW.fs
 local term = rawHW.term
 local fb = rawHW.fb or BIOS.fb
 local rawOS = rawHW.os
+local rawKeys = rawHW.keys
 
 -- ============================================================================
--- 1. Userspace Isolation Policy
+-- 1. Userspace Isolation Policy & Key Normalization
 -- ============================================================================
 -- Every userspace .app bundle and system library is compiled and executed inside
 -- a strictly isolated per-process environment (createUserspaceEnvironment) with
 -- no metatable link to the host _G. Host globals (fs, loadfile, etc.) are never
 -- exposed to userspace processes.
+
+local KEYCODE_FALLBACK = {
+    -- LWJGL3 (CC:Tweaked 1.80+)
+    [87] = "w", [65] = "a", [83] = "s", [68] = "d",
+    [81] = "q", [69] = "e", [82] = "r", [32] = "space", [257] = "enter",
+    -- LWJGL2 (Legacy CC)
+    [17] = "w", [30] = "a", [31] = "s", [32] = "d",
+    [16] = "q", [18] = "e", [19] = "r", [57] = "space", [28] = "enter"
+}
+
+local function resolveKeyName(code)
+    if type(code) == "string" then
+        local lower = code:lower()
+        if lower == " " then return "space" end
+        if lower == "return" then return "enter" end
+        return lower
+    end
+    if rawKeys and type(rawKeys.getName) == "function" then
+        local ok, name = pcall(rawKeys.getName, code)
+        if ok and type(name) == "string" and name ~= "" then
+            local lower = name:lower()
+            if lower == "return" then return "enter" end
+            return lower
+        end
+    end
+    return KEYCODE_FALLBACK[code] or tostring(code)
+end
 
 -- ============================================================================
 -- 2. Kernel State: Process Table, IPC Bus & Security Audit Log
@@ -70,9 +98,14 @@ local SYSCALL_PERMISSIONS = {
     ["fb.submitBatch"]  = "graphics.framebuffer",
     ["fb.present"]      = "graphics.framebuffer",
     ["fb.snapshot"]     = "graphics.framebuffer",
+    ["event.poll"]      = "input.events",
+    ["event.wait"]      = "input.events",
+    ["time.clock"]      = "input.events",
+    ["app.list"]        = "app.enumerate",
     ["process.self"]    = "process.info",
     ["process.list"]    = "process.list",
     ["process.spawn"]   = "process.spawn",
+    ["process.wait"]    = "process.spawn",
     ["process.kill"]    = "process.kill",
     ["ipc.register"]    = "ipc.register",
     ["ipc.send"]        = "ipc.send",
@@ -341,6 +374,56 @@ local function dispatchSyscall(pcb, syscallName, ...)
     elseif syscallName == "fb.snapshot" then
         return true, BIOS.createReadOnlyProxy(fb.getFrontbufferSnapshot(), "FramebufferSnapshot")
 
+    elseif syscallName == "event.poll" then
+        if #pcb.eventQueue == 0 then
+            return true, nil
+        end
+        local ev = table.remove(pcb.eventQueue, 1)
+        return true, ev[1], ev[2], ev[3]
+
+    elseif syscallName == "event.wait" then
+        local timeoutSec = tonumber(args[1]) or 0.05
+        if #pcb.eventQueue == 0 then
+            if rawOS and rawOS.startTimer and timeoutSec > 0 then
+                rawOS.startTimer(timeoutSec)
+            end
+            pcb.waitingForEvent = true
+            coroutine.yield("WAIT_EVENT")
+            pcb.waitingForEvent = false
+        end
+        if #pcb.eventQueue == 0 then
+            return true, "timer", 0
+        end
+        local ev = table.remove(pcb.eventQueue, 1)
+        return true, ev[1], ev[2], ev[3]
+
+    elseif syscallName == "time.clock" then
+        local clk = (rawOS and rawOS.clock and rawOS.clock()) or 0
+        return true, clk
+
+    elseif syscallName == "app.list" then
+        local apps = {}
+        if fs and fs.exists and fs.exists("/System/Apps") and fs.list then
+            local entries = fs.list("/System/Apps")
+            table.sort(entries)
+            for i = 1, #entries do
+                local name = entries[i]
+                if name:match("%.app$") then
+                    local fullPath = "/System/Apps/" .. name
+                    local bundle = verifyAndLoadAppBundle(fullPath)
+                    if bundle and bundle.manifest.id ~= "com.jos.launcher" then
+                        apps[#apps + 1] = {
+                            id = bundle.manifest.id,
+                            name = bundle.manifest.name,
+                            version = bundle.manifest.version,
+                            path = fullPath
+                        }
+                    end
+                end
+            end
+        end
+        return true, apps
+
     elseif syscallName == "process.self" then
         local permList = {}
         for k in pairs(pcb.permissions) do
@@ -380,6 +463,16 @@ local function dispatchSyscall(pcb, syscallName, ...)
             return false, spawnErr
         end
         return true, childPid
+
+    elseif syscallName == "process.wait" then
+        local childPid = tonumber(args[1])
+        local child = childPid and processes[childPid]
+        if child and child.state ~= "dead" then
+            pcb.waitingOnPid = childPid
+            coroutine.yield("WAIT_PID")
+            pcb.waitingOnPid = nil
+        end
+        return true
 
     elseif syscallName == "process.kill" then
         local targetPid = tonumber(args[1])
@@ -556,6 +649,9 @@ spawnAppProcess = function(appPath, args)
         path = bundle.path,
         permissions = bundle.permissions,
         ipcInbox = {},
+        eventQueue = {},
+        waitingForEvent = false,
+        waitingOnPid = nil,
         state = "ready",
         args = args or {}
     }
@@ -581,29 +677,89 @@ spawnAppProcess = function(appPath, args)
 end
 
 -- ============================================================================
--- 6. Barebones Cooperative Scheduler Loop
+-- 6. Barebones Cooperative Scheduler & Hardware Event Dispatcher
 -- ============================================================================
+local function dispatchHardwareEvent(evType, p1, p2, p3)
+    local normEv = nil
+    if evType == "key" then
+        normEv = { "key", resolveKeyName(p1), p2 and true or false }
+    elseif evType == "key_up" then
+        normEv = { "key_up", resolveKeyName(p1) }
+    elseif evType == "char" then
+        normEv = { "char", resolveKeyName(p1) }
+    elseif evType == "timer" then
+        normEv = { "timer", p1 }
+    else
+        normEv = { tostring(evType), p1, p2, p3 }
+    end
+
+    for pid = 1, nextPid - 1 do
+        local pcb = processes[pid]
+        if pcb and pcb.state ~= "dead" then
+            -- Only deliver input events to processes not blocked waiting on a child process
+            local blockedByChild = pcb.waitingOnPid and processes[pcb.waitingOnPid] and processes[pcb.waitingOnPid].state ~= "dead"
+            if not blockedByChild then
+                pcb.eventQueue[#pcb.eventQueue + 1] = normEv
+            end
+        end
+    end
+end
+
 local function runScheduler()
     while true do
         local aliveCount = 0
+        local runnableCount = 0
+        local waitingEventCount = 0
+
         for pid = 1, nextPid - 1 do
             local pcb = processes[pid]
             if pcb and pcb.state ~= "dead" then
                 aliveCount = aliveCount + 1
-                pcb.state = "running"
-                local ok, res = coroutine.resume(pcb.coro)
-                if not ok then
-                    pcb.state = "dead"
-                    BIOS.log("ERROR", "Kernel", "Process " .. pcb.bundleId .. " (PID " .. pid .. ") crashed: " .. tostring(res))
-                elseif coroutine.status(pcb.coro) == "dead" then
-                    pcb.state = "dead"
-                else
-                    pcb.state = "ready"
+                local blockedByChild = false
+                if pcb.waitingOnPid then
+                    local child = processes[pcb.waitingOnPid]
+                    if child and child.state ~= "dead" then
+                        blockedByChild = true
+                    else
+                        pcb.waitingOnPid = nil
+                    end
+                end
+
+                if not blockedByChild then
+                    if pcb.waitingForEvent and #pcb.eventQueue == 0 then
+                        waitingEventCount = waitingEventCount + 1
+                    else
+                        runnableCount = runnableCount + 1
+                        pcb.state = "running"
+                        local ok, res = coroutine.resume(pcb.coro)
+                        if not ok then
+                            pcb.state = "dead"
+                            BIOS.log("ERROR", "Kernel", "Process " .. pcb.bundleId .. " (PID " .. pid .. ") crashed: " .. tostring(res))
+                        elseif coroutine.status(pcb.coro) == "dead" then
+                            pcb.state = "dead"
+                        else
+                            pcb.state = "ready"
+                        end
+                    end
                 end
             end
         end
+
         if aliveCount == 0 then
             break
+        end
+
+        -- If all active processes are waiting for hardware events, pull the next event
+        if runnableCount == 0 and waitingEventCount > 0 then
+            if rawOS and rawOS.pullEventRaw then
+                local evType, p1, p2, p3 = rawOS.pullEventRaw()
+                if evType == nil or evType == "test_end" then
+                    break
+                end
+                dispatchHardwareEvent(evType, p1, p2, p3)
+            else
+                break
+            end
         end
     end
 
@@ -617,12 +773,12 @@ local function runScheduler()
 end
 
 -- ============================================================================
--- 7. Kernel Entry Point: Initialize & Launch Userspace Init.app
+-- 7. Kernel Entry Point: Initialize & Launch Userspace Launcher.app
 -- ============================================================================
 BIOS.log("INFO", "Kernel", "CC-jOS Kernel v" .. KERNEL_VERSION .. " initialized.")
 BIOS.log("INFO", "Kernel", "Enforcing RSA-SHA256 codesigning & per-process capability permissions.")
 
-local initAppPath = (bootConfig and bootConfig.initApp) or "/System/Apps/Init.app"
+local initAppPath = (bootConfig and bootConfig.initApp) or "/System/Apps/Launcher.app"
 BIOS.log("INFO", "Kernel", "Launching initial userspace bundle: " .. initAppPath)
 
 local initPid, initErr = spawnAppProcess(initAppPath, {})
