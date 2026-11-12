@@ -8,9 +8,10 @@ if not BIOS or not rawHW then
     error("KERNEL_PANIC: Kernel must be booted by CC-jOS Bootloader", 0)
 end
 
-local KERNEL_VERSION = "1.0.0-micro"
+local KERNEL_VERSION = "1.1.0-micro"
 local fs = rawHW.fs
 local term = rawHW.term
+local fb = rawHW.fb or BIOS.fb
 local rawOS = rawHW.os
 
 -- ============================================================================
@@ -57,18 +58,28 @@ local SYSMODULE_ONLY_PERMISSIONS = {
 
 -- Map of syscalls to their required permission capability
 local SYSCALL_PERMISSIONS = {
-    ["console.write"] = "kernel.console",
-    ["console.print"] = "kernel.console",
-    ["process.self"]  = "process.info",
-    ["process.list"]  = "process.list",
-    ["process.spawn"] = "process.spawn",
-    ["process.kill"]  = "process.kill",
-    ["ipc.register"]  = "ipc.register",
-    ["ipc.send"]      = "ipc.send",
-    ["ipc.recv"]      = "ipc.recv",
-    ["hw.fs"]         = "hw.fs.raw",
-    ["hw.term"]       = "hw.term.raw",
-    ["kernel.audit"]  = "kernel.audit"
+    ["console.write"]  = "kernel.console",
+    ["console.print"]  = "kernel.console",
+    ["fb.info"]        = "graphics.framebuffer",
+    ["fb.clear"]       = "graphics.framebuffer",
+    ["fb.setCell"]     = "graphics.framebuffer",
+    ["fb.getCell"]     = "graphics.framebuffer",
+    ["fb.writeText"]   = "graphics.framebuffer",
+    ["fb.fillRect"]    = "graphics.framebuffer",
+    ["fb.blitRow"]     = "graphics.framebuffer",
+    ["fb.submitBatch"] = "graphics.framebuffer",
+    ["fb.present"]     = "graphics.framebuffer",
+    ["fb.snapshot"]    = "graphics.framebuffer",
+    ["process.self"]   = "process.info",
+    ["process.list"]   = "process.list",
+    ["process.spawn"]  = "process.spawn",
+    ["process.kill"]   = "process.kill",
+    ["ipc.register"]   = "ipc.register",
+    ["ipc.send"]       = "ipc.send",
+    ["ipc.recv"]       = "ipc.recv",
+    ["hw.fs"]          = "hw.fs.raw",
+    ["hw.term"]        = "hw.term.raw",
+    ["kernel.audit"]   = "kernel.audit"
 }
 
 -- ============================================================================
@@ -279,6 +290,51 @@ local function dispatchSyscall(pcb, syscallName, ...)
         print(table.concat(parts, "\t"))
         return true
 
+    elseif syscallName == "fb.info" then
+        local w, h = fb.getSize()
+        return true, BIOS.createReadOnlyProxy({
+            width = w,
+            height = h,
+            isColor = (term and term.isColor and term.isColor()) or true
+        }, "FramebufferInfo")
+
+    elseif syscallName == "fb.clear" then
+        fb.clear(args[1], args[2], args[3])
+        return true
+
+    elseif syscallName == "fb.setCell" then
+        return true, fb.setCell(args[1], args[2], args[3], args[4], args[5])
+
+    elseif syscallName == "fb.getCell" then
+        local c, fgHex, bgHex = fb.getCell(args[1], args[2])
+        if not c then
+            return false, "ERR_FB_BOUNDS: Coordinates out of range"
+        end
+        return true, c, fgHex, bgHex
+
+    elseif syscallName == "fb.writeText" then
+        return true, fb.writeText(args[1], args[2], args[3], args[4], args[5])
+
+    elseif syscallName == "fb.fillRect" then
+        return true, fb.fillRect(args[1], args[2], args[3], args[4], args[5], args[6], args[7])
+
+    elseif syscallName == "fb.blitRow" then
+        return true, fb.blitRow(args[1], args[2], args[3], args[4], args[5])
+
+    elseif syscallName == "fb.submitBatch" then
+        local okBatch, batchErr = fb.submitBatch(args[1])
+        if not okBatch then
+            return false, "ERR_FB_BATCH: " .. tostring(batchErr)
+        end
+        return true
+
+    elseif syscallName == "fb.present" then
+        fb.present()
+        return true
+
+    elseif syscallName == "fb.snapshot" then
+        return true, BIOS.createReadOnlyProxy(fb.getFrontbufferSnapshot(), "FramebufferSnapshot")
+
     elseif syscallName == "process.self" then
         local permList = {}
         for k in pairs(pcb.permissions) do
@@ -414,10 +470,14 @@ local function createUserspaceEnvironment(pcb, bundle)
     end
 
     -- Intra-bundle module loader (only loads hash-verified files from the bundle itself)
+    local loadedModules = {}
     env.bundleRequire = function(relPath)
         relPath = tostring(relPath or "")
         if not relPath:match("%.lua$") then
             relPath = relPath .. ".lua"
+        end
+        if loadedModules["bundle:" .. relPath] then
+            return loadedModules["bundle:" .. relPath]
         end
         local code = bundle.files[relPath]
         if not code then
@@ -427,7 +487,42 @@ local function createUserspaceEnvironment(pcb, bundle)
         if not fn then
             error(err, 2)
         end
-        return fn()
+        local res = fn()
+        loadedModules["bundle:" .. relPath] = res
+        return res
+    end
+
+    -- Signed System Library & Bundle Module Loader (e.g. require("jvk"))
+    env.require = function(modName)
+        modName = tostring(modName or "")
+        if loadedModules[modName] then
+            return loadedModules[modName]
+        end
+        -- 1. Check if module exists inside the app's own verified bundle
+        local relFile = modName:match("%.lua$") and modName or (modName .. ".lua")
+        if bundle.files[relFile] then
+            local res = env.bundleRequire(relFile)
+            loadedModules[modName] = res
+            return res
+        end
+        -- 2. Otherwise load from signed OS library directory (/System/Libraries/<modName>.lua)
+        local cleanName = modName:gsub("%.lua$", "")
+        if not cleanName:match("^[%w_%-]+$") then
+            error("ERR_LIBRARY_NAME: Invalid system library name '" .. tostring(modName) .. "'", 2)
+        end
+        local libPath = "/System/Libraries/" .. cleanName .. ".lua"
+        local sigPath = libPath .. ".sig"
+        local okSig, libSourceOrErr = BIOS.verifySignedFile(libPath, sigPath)
+        if not okSig then
+            error("ERR_LIBRARY_CODESIGN: Failed to load signed system library '" .. cleanName .. "': " .. tostring(libSourceOrErr), 2)
+        end
+        local fn, compErr = BIOS.loadProtectedChunk(libSourceOrErr, "@" .. libPath, env)
+        if not fn then
+            error("ERR_LIBRARY_COMPILE: " .. tostring(compErr), 2)
+        end
+        local res = fn()
+        loadedModules[modName] = res
+        return res
     end
 
     env._G = env

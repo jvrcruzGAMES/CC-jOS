@@ -538,51 +538,332 @@ local function verifySignedFile(filePath, sigPath)
     return true, content, actualHash
 end
 
--- Console logging & panic handler
-local function biosLog(level, component, msg)
-    local prefix = string.format("[%s][%s] ", tostring(level), tostring(component))
-    if rawTerm and rawTerm.isColor and rawTerm.isColor() and rawColors then
-        local prev = rawTerm.getTextColor and rawTerm.getTextColor() or rawColors.white
-        if level == "ERROR" or level == "PANIC" then
-            rawTerm.setTextColor(rawColors.red)
-        elseif level == "WARN" then
-            rawTerm.setTextColor(rawColors.yellow)
-        elseif level == "OK" then
-            rawTerm.setTextColor(rawColors.lime or rawColors.green)
-        else
-            rawTerm.setTextColor(rawColors.cyan or rawColors.lightBlue)
+-- ============================================================================
+-- 3.5. BIOS Framebuffer System (Direct Low-Level Scanline Backbuffer)
+-- ============================================================================
+local COLOR_INT_TO_HEX = {
+    [1] = "0",     [2] = "1",     [4] = "2",     [8] = "3",
+    [16] = "4",    [32] = "5",    [64] = "6",    [128] = "7",
+    [256] = "8",   [512] = "9",   [1024] = "a",  [2048] = "b",
+    [4096] = "c",  [8192] = "d",  [16384] = "e", [32768] = "f"
+}
+
+local COLOR_NAME_TO_HEX = {
+    white = "0", orange = "1", magenta = "2", lightBlue = "3",
+    yellow = "4", lime = "5", pink = "6", gray = "7", grey = "7",
+    lightGray = "8", lightGrey = "8", cyan = "9", purple = "a",
+    blue = "b", brown = "c", green = "d", red = "e", black = "f"
+}
+
+local HEX_TO_COLOR_INT = {
+    ["0"] = 1,     ["1"] = 2,     ["2"] = 4,     ["3"] = 8,
+    ["4"] = 16,    ["5"] = 32,    ["6"] = 64,    ["7"] = 128,
+    ["8"] = 256,   ["9"] = 512,   ["a"] = 1024,  ["b"] = 2048,
+    ["c"] = 4096,  ["d"] = 8192,  ["e"] = 16384, ["f"] = 32768
+}
+
+local function toBlitHex(col, defaultHex)
+    defaultHex = defaultHex or "0"
+    if col == nil then return defaultHex end
+    if type(col) == "number" then
+        return COLOR_INT_TO_HEX[col] or defaultHex
+    elseif type(col) == "string" then
+        if #col == 1 and col:match("^[0-9a-fA-F]$") then
+            return col:lower()
         end
-        if rawTerm.write then
-            rawTerm.write(prefix)
-            rawTerm.setTextColor(rawColors.white)
-            print(tostring(msg))
-            rawTerm.setTextColor(prev)
-            return
+        return COLOR_NAME_TO_HEX[col] or defaultHex
+    end
+    return defaultHex
+end
+
+local fbWidth, fbHeight = 51, 19
+if rawTerm and rawTerm.getSize then
+    local w, h = rawTerm.getSize()
+    if type(w) == "number" and type(h) == "number" and w > 0 and h > 0 then
+        fbWidth, fbHeight = math.floor(w), math.floor(h)
+    end
+end
+
+local fbChars = {}
+local fbFg = {}
+local fbBg = {}
+local frontTextRows = {}
+local frontFgRows = {}
+local frontBgRows = {}
+local presentCount = 0
+
+local function initFramebufferRows(bgHex, fgHex, ch)
+    bgHex = toBlitHex(bgHex, "f")
+    fgHex = toBlitHex(fgHex, "0")
+    ch = (type(ch) == "string" and #ch > 0) and ch:sub(1, 1) or " "
+    for y = 1, fbHeight do
+        local cRow, fRow, bRow = {}, {}, {}
+        for x = 1, fbWidth do
+            cRow[x] = ch
+            fRow[x] = fgHex
+            bRow[x] = bgHex
+        end
+        fbChars[y] = cRow
+        fbFg[y] = fRow
+        fbBg[y] = bRow
+    end
+end
+
+initFramebufferRows("f", "0", " ")
+
+local function fbGetSize()
+    return fbWidth, fbHeight
+end
+
+local function fbClear(bgColor, fgColor, fillChar)
+    initFramebufferRows(bgColor or "f", fgColor or "0", fillChar or " ")
+    return true
+end
+
+local function fbSetCell(x, y, char, fgColor, bgColor)
+    x = math.floor(tonumber(x) or 0)
+    y = math.floor(tonumber(y) or 0)
+    if x < 1 or x > fbWidth or y < 1 or y > fbHeight then
+        return false
+    end
+    if char ~= nil then
+        local s = tostring(char)
+        fbChars[y][x] = (#s > 0) and s:sub(1, 1) or " "
+    end
+    if fgColor ~= nil then
+        fbFg[y][x] = toBlitHex(fgColor, fbFg[y][x])
+    end
+    if bgColor ~= nil then
+        fbBg[y][x] = toBlitHex(bgColor, fbBg[y][x])
+    end
+    return true
+end
+
+local function fbGetCell(x, y)
+    x = math.floor(tonumber(x) or 0)
+    y = math.floor(tonumber(y) or 0)
+    if x < 1 or x > fbWidth or y < 1 or y > fbHeight then
+        return nil
+    end
+    return fbChars[y][x], fbFg[y][x], fbBg[y][x]
+end
+
+local function fbWriteText(x, y, text, fgColor, bgColor)
+    x = math.floor(tonumber(x) or 1)
+    y = math.floor(tonumber(y) or 1)
+    text = tostring(text or "")
+    if y < 1 or y > fbHeight or #text == 0 then
+        return false
+    end
+    local fgHex = fgColor and toBlitHex(fgColor, "0") or nil
+    local bgHex = bgColor and toBlitHex(bgColor, "f") or nil
+    local cRow, fRow, bRow = fbChars[y], fbFg[y], fbBg[y]
+    for i = 1, #text do
+        local cx = x + i - 1
+        if cx >= 1 and cx <= fbWidth then
+            cRow[cx] = text:sub(i, i)
+            if fgHex then fRow[cx] = fgHex end
+            if bgHex then bRow[cx] = bgHex end
         end
     end
-    print(prefix .. tostring(msg))
+    return true
+end
+
+local function fbFillRect(x, y, w, h, char, fgColor, bgColor)
+    x = math.floor(tonumber(x) or 1)
+    y = math.floor(tonumber(y) or 1)
+    w = math.floor(tonumber(w) or 0)
+    h = math.floor(tonumber(h) or 0)
+    if w <= 0 or h <= 0 then return false end
+    local ch = (char ~= nil and #tostring(char) > 0) and tostring(char):sub(1, 1) or " "
+    local fgHex = fgColor and toBlitHex(fgColor, "0") or nil
+    local bgHex = bgColor and toBlitHex(bgColor, "f") or nil
+
+    local x0 = math.max(1, x)
+    local y0 = math.max(1, y)
+    local x1 = math.min(fbWidth, x + w - 1)
+    local y1 = math.min(fbHeight, y + h - 1)
+
+    for py = y0, y1 do
+        local cRow, fRow, bRow = fbChars[py], fbFg[py], fbBg[py]
+        for px = x0, x1 do
+            cRow[px] = ch
+            if fgHex then fRow[px] = fgHex end
+            if bgHex then bRow[px] = bgHex end
+        end
+    end
+    return true
+end
+
+local function fbBlitRow(x, y, text, fgStr, bgStr)
+    x = math.floor(tonumber(x) or 1)
+    y = math.floor(tonumber(y) or 1)
+    text = tostring(text or "")
+    fgStr = tostring(fgStr or "")
+    bgStr = tostring(bgStr or "")
+    if y < 1 or y > fbHeight or #text == 0 then
+        return false
+    end
+    local cRow, fRow, bRow = fbChars[y], fbFg[y], fbBg[y]
+    for i = 1, #text do
+        local cx = x + i - 1
+        if cx >= 1 and cx <= fbWidth then
+            cRow[cx] = text:sub(i, i)
+            if i <= #fgStr then
+                fRow[cx] = toBlitHex(fgStr:sub(i, i), fRow[cx])
+            end
+            if i <= #bgStr then
+                bRow[cx] = toBlitHex(bgStr:sub(i, i), bRow[cx])
+            end
+        end
+    end
+    return true
+end
+
+local function fbPresent()
+    presentCount = presentCount + 1
+    if rawTerm and rawTerm.setCursorBlink then
+        rawTerm.setCursorBlink(false)
+    end
+    for y = 1, fbHeight do
+        local tRow = table.concat(fbChars[y])
+        local fRow = table.concat(fbFg[y])
+        local bRow = table.concat(fbBg[y])
+        frontTextRows[y] = tRow
+        frontFgRows[y] = fRow
+        frontBgRows[y] = bRow
+
+        if rawTerm then
+            if rawTerm.setCursorPos then
+                rawTerm.setCursorPos(1, y)
+            end
+            if rawTerm.blit then
+                rawTerm.blit(tRow, fRow, bRow)
+            elseif rawTerm.write then
+                if rawTerm.setBackgroundColor then
+                    rawTerm.setBackgroundColor(HEX_TO_COLOR_INT[bRow:sub(1, 1)] or 32768)
+                end
+                if rawTerm.setTextColor then
+                    rawTerm.setTextColor(HEX_TO_COLOR_INT[fRow:sub(1, 1)] or 1)
+                end
+                rawTerm.write(tRow)
+            end
+        end
+    end
+    return true
+end
+
+local function fbSubmitBatch(commands)
+    if type(commands) ~= "table" then
+        return false, "Batch must be a table of commands"
+    end
+    for i = 1, #commands do
+        local cmd = commands[i]
+        if type(cmd) == "table" then
+            local op = cmd.op
+            if op == "clear" then
+                fbClear(cmd.bg, cmd.fg, cmd.char)
+            elseif op == "cell" then
+                fbSetCell(cmd.x, cmd.y, cmd.char, cmd.fg, cmd.bg)
+            elseif op == "text" then
+                fbWriteText(cmd.x, cmd.y, cmd.text, cmd.fg, cmd.bg)
+            elseif op == "rect" then
+                fbFillRect(cmd.x, cmd.y, cmd.w, cmd.h, cmd.char, cmd.fg, cmd.bg)
+            elseif op == "blit" then
+                fbBlitRow(cmd.x, cmd.y, cmd.text, cmd.fg, cmd.bg)
+            elseif op == "present" then
+                fbPresent()
+            end
+        end
+    end
+    return true
+end
+
+local function fbGetFrontbufferSnapshot()
+    local textCopy, fgCopy, bgCopy = {}, {}, {}
+    for y = 1, fbHeight do
+        textCopy[y] = frontTextRows[y] or table.concat(fbChars[y])
+        fgCopy[y] = frontFgRows[y] or table.concat(fbFg[y])
+        bgCopy[y] = frontBgRows[y] or table.concat(fbBg[y])
+    end
+    return {
+        width = fbWidth,
+        height = fbHeight,
+        presentCount = presentCount,
+        textRows = textCopy,
+        fgRows = fgCopy,
+        bgRows = bgCopy
+    }
+end
+
+-- Hardcoded BIOS Boot Screen:
+-- Clears the framebuffer to black and draws a single white uppercase letter "J"
+-- centered horizontally and vertically on the screen.
+local function fbRenderBootSplash()
+    fbClear("f", "0", " ")
+    local centerX = math.floor((fbWidth + 1) / 2)
+    local centerY = math.floor((fbHeight + 1) / 2)
+    fbSetCell(centerX, centerY, "J", "0", "f")
+    fbPresent()
+    return centerX, centerY
+end
+
+local FB_INTERNAL = {
+    getSize = fbGetSize,
+    toBlitHex = toBlitHex,
+    clear = fbClear,
+    setCell = fbSetCell,
+    getCell = fbGetCell,
+    writeText = fbWriteText,
+    fillRect = fbFillRect,
+    blitRow = fbBlitRow,
+    submitBatch = fbSubmitBatch,
+    present = fbPresent,
+    getFrontbufferSnapshot = fbGetFrontbufferSnapshot,
+    renderBootSplash = fbRenderBootSplash
+}
+
+-- In-memory boot log ring buffer so low-level boot stages do not overwrite
+-- the centered white "J" boot screen before the start app takes over rendering.
+local bootLogs = {}
+local function biosLog(level, component, msg)
+    bootLogs[#bootLogs + 1] = {
+        seq = #bootLogs + 1,
+        level = tostring(level),
+        component = tostring(component),
+        message = tostring(msg)
+    }
+end
+
+local function biosGetBootLogs()
+    local copy = {}
+    for i = 1, #bootLogs do
+        local entry = bootLogs[i]
+        copy[i] = {
+            seq = entry.seq,
+            level = entry.level,
+            component = entry.component,
+            message = entry.message
+        }
+    end
+    return copy
 end
 
 local function biosPanic(component, reason)
-    if rawTerm and rawTerm.isColor and rawTerm.isColor() and rawColors then
-        rawTerm.setBackgroundColor(rawColors.red)
-        rawTerm.setTextColor(rawColors.white)
-        if rawTerm.clear then rawTerm.clear() end
-        if rawTerm.setCursorPos then rawTerm.setCursorPos(1, 1) end
-    end
-    print("==========================================")
-    print("         CC-jOS SECURITY PANIC            ")
-    print("==========================================")
-    print("Component : " .. tostring(component))
-    print("Reason    : " .. tostring(reason))
-    print("------------------------------------------")
-    print("System halted to protect platform integrity.")
+    fbClear("e", "0", " ")
+    fbWriteText(2, 2, "==========================================", "0", "e")
+    fbWriteText(2, 3, "         CC-jOS SECURITY PANIC            ", "0", "e")
+    fbWriteText(2, 4, "==========================================", "0", "e")
+    fbWriteText(2, 6, "Component : " .. tostring(component), "0", "e")
+    fbWriteText(2, 7, "Reason    : " .. tostring(reason):sub(1, fbWidth - 14), "0", "e")
+    fbWriteText(2, 9, "System halted to protect platform integrity.", "0", "e")
+    fbPresent()
     error("CC_JOS_PANIC:" .. tostring(component) .. ":" .. tostring(reason), 0)
 end
 
 -- Construct the immutable BIOS API table exposed to Bootloader & Kernel
 local BIOS_INTERNAL = {
-    version = "1.0.0-jOS",
+    version = "1.1.0-jOS",
     rootPublicKey = ROOT_PUBLIC_KEY,
     sha256 = sha256,
     verifySignature = verifySignature,
@@ -594,7 +875,9 @@ local BIOS_INTERNAL = {
     readFileRaw = readFileRaw,
     normalizePath = normalizePath,
     isBIOSPath = isBIOSPath,
+    fb = FB_INTERNAL,
     log = biosLog,
+    getBootLogs = biosGetBootLogs,
     panic = biosPanic
 }
 
@@ -604,6 +887,7 @@ local BIOS = createReadOnlyProxy(BIOS_INTERNAL, "BIOS")
 local rawHW = {
     fs = rawFS,
     term = rawTerm,
+    fb = FB_INTERNAL,
     os = {
         pullEventRaw = rawPullEventRaw,
         pullEvent = rawPullEvent,
@@ -617,15 +901,19 @@ local rawHW = {
         computerID = rawOS.computerID or rawOS.getComputerID,
         computerLabel = rawOS.computerLabel or rawOS.getComputerLabel,
         shutdown = rawOS.shutdown,
-        reboot = rawOS.reboot
+        reboot = rawOS.reboot,
+        _testHook = rawOS._testHook
     },
     http = rawHTTP,
     colors = rawColors
 }
 
 -- ============================================================================
--- 4. Verified Boot Chain Stage 1: Verify & Execute Bootloader
+-- 4. Verified Boot Chain Stage 1: Render Boot Screen & Execute Bootloader
 -- ============================================================================
+-- Immediately display the hardcoded boot screen (centered white uppercase "J")
+-- via the BIOS framebuffer. It remains on screen until the start app launches.
+BIOS.fb.renderBootSplash()
 BIOS.log("INFO", "BIOS", "CC-jOS BIOS v" .. BIOS.version .. " initializing...")
 BIOS.log("INFO", "BIOS", "Root CA: " .. ROOT_PUBLIC_KEY.keyId .. " (" .. ROOT_PUBLIC_KEY.algorithm .. ")")
 

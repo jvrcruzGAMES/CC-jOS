@@ -13,6 +13,8 @@ local MANIFEST_FILES = {
     { remote = "boot/bootloader.lua.sig",              target = "/boot/bootloader.lua.sig" },
     { remote = "System/Kernel/kernel.lua",             target = "/System/Kernel/kernel.lua" },
     { remote = "System/Kernel/kernel.lua.sig",         target = "/System/Kernel/kernel.lua.sig" },
+    { remote = "System/Libraries/jvk.lua",             target = "/System/Libraries/jvk.lua" },
+    { remote = "System/Libraries/jvk.lua.sig",         target = "/System/Libraries/jvk.lua.sig" },
     { remote = "System/Apps/Init.app/manifest.lua",    target = "/System/Apps/Init.app/manifest.lua" },
     { remote = "System/Apps/Init.app/main.lua",        target = "/System/Apps/Init.app/main.lua" },
     { remote = "System/Apps/Init.app/signature.sig",   target = "/System/Apps/Init.app/signature.sig" },

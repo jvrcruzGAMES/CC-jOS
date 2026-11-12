@@ -2,12 +2,13 @@
 -- ============================================================================
 -- CC-jOS End-to-End Verification & Security Test Suite (tests/test_os.lua)
 -- Simulates a CC:Tweaked Computer environment and tests:
---   1. GitHub Installer (installer.lua)
---   2. Full Verified Boot Chain: BIOS -> Bootloader -> Kernel -> Init.app ("Kernel's up")
---   3. BIOS Immutability Enforcement
---   4. Bootloader Signed Update Application & Tamper Rejection
---   5. Kernel Strict Code Signing (.app bundle verification & tamper rejection)
---   6. Kernel Strict Permission Enforcing (User App vs Sysmodule privilege separation)
+--   1. GitHub Installer (installer.lua) including /System/Libraries/jvk.lua
+--   2. BIOS Framebuffer & Centered White "J" Boot Screen (retained until start app)
+--   3. Start App (Init.app) taking over rendering via libjvk (2D UI + 3D Cube + "Kernel's up")
+--   4. BIOS Immutability Enforcement
+--   5. Bootloader Signed Update Application & Tamper Rejection
+--   6. Kernel Strict Code Signing (.app bundle & signed library tamper rejection)
+--   7. Kernel Strict Permission Enforcing (User App vs Sysmodule privilege separation)
 -- ============================================================================
 
 local Crypto = dofile("tools/crypto.lua")
@@ -21,12 +22,25 @@ local function readHostFile(path)
     return c
 end
 
--- Create an in-memory CC:Tweaked Virtual Filesystem and Terminal
+-- Create an in-memory CC:Tweaked Virtual Filesystem and Framebuffer-capable Terminal
 local function createMockComputer()
     local vfsFiles = {}
     local vfsDirs = { ["/"] = true }
     local consoleLines = {}
     local currentLine = ""
+
+    local termW, termH = 51, 19
+    local curX, curY = 1, 1
+    local screenText = {}
+    local screenFg = {}
+    local screenBg = {}
+    local frameHistory = {} -- snapshots captured whenever row termH is blitted
+
+    for y = 1, termH do
+        screenText[y] = string.rep(" ", termW)
+        screenFg[y] = string.rep("0", termW)
+        screenBg[y] = string.rep("f", termW)
+    end
 
     local function norm(p)
         p = tostring(p or ""):gsub("\\", "/"):gsub("/+", "/")
@@ -138,13 +152,40 @@ local function createMockComputer()
     end
 
     local mockTerm = {
+        getSize = function() return termW, termH end,
         isColor = function() return true end,
         setTextColor = function() end,
         getTextColor = function() return 1 end,
         setBackgroundColor = function() end,
+        setCursorBlink = function() end,
         clear = function() end,
-        setCursorPos = function() end,
-        write = function(s) currentLine = currentLine .. tostring(s) end
+        setCursorPos = function(x, y)
+            curX = math.floor(tonumber(x) or 1)
+            curY = math.floor(tonumber(y) or 1)
+        end,
+        write = function(s)
+            currentLine = currentLine .. tostring(s)
+        end,
+        blit = function(textRow, fgRow, bgRow)
+            if curY >= 1 and curY <= termH then
+                screenText[curY] = tostring(textRow)
+                screenFg[curY] = tostring(fgRow)
+                screenBg[curY] = tostring(bgRow)
+                if curY == termH then
+                    local tSnap, fSnap, bSnap = {}, {}, {}
+                    for y = 1, termH do
+                        tSnap[y] = screenText[y]
+                        fSnap[y] = screenFg[y]
+                        bSnap[y] = screenBg[y]
+                    end
+                    frameHistory[#frameHistory + 1] = {
+                        text = tSnap,
+                        fg = fSnap,
+                        bg = bSnap
+                    }
+                end
+            end
+        end
     }
 
     local mockHTTP = {
@@ -185,6 +226,10 @@ local function createMockComputer()
         vfsFiles = vfsFiles,
         vfsDirs = vfsDirs,
         consoleLines = consoleLines,
+        screenText = screenText,
+        screenFg = screenFg,
+        screenBg = screenBg,
+        frameHistory = frameHistory,
         fs = mockFS,
         term = mockTerm,
         http = mockHTTP,
@@ -211,10 +256,18 @@ local function runInComputer(comp, vfsScriptPath, args, testHook)
     setfenv(fn, env)
 
     if testHook then
-        -- Inject _testHook into rawHW via a wrapper around bios -> bootloader -> kernel
         comp.os._testHook = testHook
     end
     return fn(unpack(args or {}))
+end
+
+local function screenContainsText(frame, needle)
+    for y = 1, #frame.text do
+        if frame.text[y]:find(needle, 1, true) then
+            return true
+        end
+    end
+    return false
 end
 
 print("=== Running CC-jOS Automated Verification Suite ===")
@@ -231,35 +284,55 @@ assert(comp.vfsFiles["/boot/bootloader.lua"], "Installer must install /boot/boot
 assert(comp.vfsFiles["/boot/bootloader.lua.sig"], "Installer must install /boot/bootloader.lua.sig")
 assert(comp.vfsFiles["/System/Kernel/kernel.lua"], "Installer must install /System/Kernel/kernel.lua")
 assert(comp.vfsFiles["/System/Kernel/kernel.lua.sig"], "Installer must install /System/Kernel/kernel.lua.sig")
+assert(comp.vfsFiles["/System/Libraries/jvk.lua"], "Installer must install /System/Libraries/jvk.lua")
+assert(comp.vfsFiles["/System/Libraries/jvk.lua.sig"], "Installer must install /System/Libraries/jvk.lua.sig")
 assert(comp.vfsFiles["/System/Apps/Init.app/manifest.lua"], "Installer must install Init.app/manifest.lua")
 assert(comp.vfsFiles["/System/Apps/Init.app/main.lua"], "Installer must install Init.app/main.lua")
 assert(comp.vfsFiles["/System/Apps/Init.app/signature.sig"], "Installer must install Init.app/signature.sig")
-print("[PASS] 1. GitHub Installer downloaded & installed all OS files into VFS")
+print("[PASS] 1. GitHub Installer downloaded & installed all OS files (including libjvk) into VFS")
 
 -- ----------------------------------------------------------------------------
--- Test 2: Full Verified Boot Chain (BIOS -> Bootloader -> Kernel -> Init.app)
+-- Test 2: Boot Screen ("J" centered) & Start App Taking Over via libjvk
 -- ----------------------------------------------------------------------------
-for i = #comp.consoleLines, 1, -1 do comp.consoleLines[i] = nil end
+for i = #comp.frameHistory, 1, -1 do comp.frameHistory[i] = nil end
 runInComputer(comp, "/startup.lua")
 
-local foundKernelsUp = false
-for _, line in ipairs(comp.consoleLines) do
-    if line == "Kernel's up" then
-        foundKernelsUp = true
+assert(#comp.frameHistory >= 2, "Expected boot splash frame(s) followed by Init.app libjvk frame")
+
+-- Verify the early boot frames (BIOS & Bootloader) are strictly a centered white "J" on black
+local bootFrame = comp.frameHistory[1]
+local centerX = math.floor((51 + 1) / 2) -- 26
+local centerY = math.floor((19 + 1) / 2) -- 10
+assert(bootFrame.text[centerY]:sub(centerX, centerX) == "J", "Boot screen must have 'J' centered at (26, 10)")
+assert(bootFrame.fg[centerY]:sub(centerX, centerX) == "0", "Boot screen 'J' must be white ('0')")
+assert(bootFrame.bg[centerY]:sub(centerX, centerX) == "f", "Boot screen background must be black ('f')")
+
+-- Verify every other cell on the boot splash frame is blank space
+for y = 1, 19 do
+    for x = 1, 51 do
+        local ch = bootFrame.text[y]:sub(x, x)
+        if x == centerX and y == centerY then
+            assert(ch == "J", "Center cell must be 'J'")
+        else
+            assert(ch == " ", "Boot screen cell (" .. x .. "," .. y .. ") must be blank space, got: " .. ch)
+        end
     end
 end
-assert(foundKernelsUp, "Expected Init.app to output 'Kernel's up' during boot!")
-print("[PASS] 2. Full Boot Chain (BIOS -> Bootloader -> Kernel -> Init.app) printed: \"Kernel's up\"")
+print("[PASS] 2a. BIOS & Bootloader rendered hardcoded centered white 'J' directly via BIOS.fb")
+
+-- Verify final frame after Init.app took over the rendering stack via libjvk
+local appFrame = comp.frameHistory[#comp.frameHistory]
+assert(screenContainsText(appFrame, "Kernel's up"), "Expected Init.app to render \"Kernel's up\" via libjvk")
+assert(screenContainsText(appFrame, "CC-jOS Userspace [libjvk]"), "Expected Init.app 2D UI Window title")
+assert(screenContainsText(appFrame, "3D Cube"), "Expected Init.app 3D Viewport title")
+print("[PASS] 2b. Init.app took over rendering stack via libjvk (2D UI + 3D Cube + \"Kernel's up\")")
 
 -- ----------------------------------------------------------------------------
 -- Test 3: BIOS Immutability Enforcement
 -- ----------------------------------------------------------------------------
--- Note: After Kernel boots, _G.fs is nil for userspace, and the wrapped FS
--- created by BIOS enforces immutability on /startup.lua. Let's test BIOS FS wrapper directly.
 local compImmut = createMockComputer()
 compImmut.vfsFiles["/installer.lua"] = readHostFile("installer.lua")
 runInComputer(compImmut, "/installer.lua", { "--no-reboot" })
--- Replace bootloader temporarily with a signed diagnostic bootloader to inspect rawHW.fs
 local diagBoot = [[
 local BIOS, rawHW = ...
 assert(rawHW.fs.isReadOnly("/startup.lua") == true, "/startup.lua must be read-only")
@@ -290,18 +363,14 @@ local compUpdate = createMockComputer()
 compUpdate.vfsFiles["/installer.lua"] = readHostFile("installer.lua")
 runInComputer(compUpdate, "/installer.lua", { "--no-reboot" })
 
--- Stage a corrupt/unsigned kernel update in /boot/update/kernel.lua
 compUpdate.vfsFiles["/boot/update/kernel.lua"] = "-- tampered kernel"
 compUpdate.vfsFiles["/boot/update/kernel.lua.sig"] = 'signature = "deadbeef"'
-for i = #compUpdate.consoleLines, 1, -1 do compUpdate.consoleLines[i] = nil end
+for i = #compUpdate.frameHistory, 1, -1 do compUpdate.frameHistory[i] = nil end
 runInComputer(compUpdate, "/startup.lua")
--- Should have rejected the tampered update and still booted the valid kernel!
 assert(compUpdate.vfsFiles["/boot/update/kernel.lua"] == nil, "Tampered staged update should be cleaned up")
-local bootedAfterTamperUpdate = false
-for _, line in ipairs(compUpdate.consoleLines) do
-    if line == "Kernel's up" then bootedAfterTamperUpdate = true end
-end
-assert(bootedAfterTamperUpdate, "System should reject bad update and boot existing valid kernel")
+local finalUpdateFrame = compUpdate.frameHistory[#compUpdate.frameHistory]
+assert(finalUpdateFrame and screenContainsText(finalUpdateFrame, "Kernel's up"),
+    "System should reject bad update and boot existing valid kernel")
 print("[PASS] 4. Bootloader update verification & tamper rejection verified")
 
 -- ----------------------------------------------------------------------------
@@ -332,7 +401,6 @@ compSec.vfsFiles["/System/Apps/Init.app/extra.lua"] = nil
 print("[PASS] 5b. Kernel rejected .app bundle with extra unsigned file (ERR_CODESIGN_UNSIGNED_FILE)")
 
 -- 6: Verify User App vs Sysmodule Permission Separation
--- Create a signed User App that tries to request sysmodule permission 'hw.fs.raw'
 local badUserManifest = {
     id = "com.jos.baduser",
     name = "BadUser",
@@ -344,7 +412,6 @@ local badUserManifest = {
         ["main.lua"] = Crypto.sha256('print("Should never run")')
     }
 }
--- Even if signed with the root key, Kernel policy forbids type="user" from holding "hw.fs.raw"!
 local function serializeCanonical(val)
     local t = type(val)
     if t == "string" then return string.format("%q", val)

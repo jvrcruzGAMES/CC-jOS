@@ -179,6 +179,7 @@ elseif cmd == "sign-app" then
 elseif cmd == "sign-all" then
     signFile("boot/bootloader.lua")
     signFile("System/Kernel/kernel.lua")
+    signFile("System/Libraries/jvk.lua")
     signAppBundle("System/Apps/Init.app")
 else
     error("Unknown command: " .. tostring(cmd))

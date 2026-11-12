@@ -111,6 +111,10 @@ end
 -- ============================================================================
 -- Bootloader Execution Flow
 -- ============================================================================
+-- Maintain the hardcoded centered white "J" boot screen directly via BIOS.fb
+if BIOS.fb and BIOS.fb.renderBootSplash then
+    BIOS.fb.renderBootSplash()
+end
 BIOS.log("INFO", "Bootloader", "CC-jOS Bootloader v" .. BOOTLOADER_VERSION .. " starting...")
 
 local bootConfig = loadBootConfig("/boot/boot.cfg")
