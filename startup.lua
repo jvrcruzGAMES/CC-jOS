@@ -539,8 +539,12 @@ local function verifySignedFile(filePath, sigPath)
 end
 
 -- ============================================================================
--- 3.5. BIOS Framebuffer System (Direct Low-Level Scanline Backbuffer)
+-- 3.5. BIOS Pixelwise Framebuffer System (Sanjuuni-Style 2x3 Teletext Subpixels)
 -- ============================================================================
+-- In CC:Tweaked, characters 128..159 (0x80..0x9F) encode a 2x3 grid of sub-pixels
+-- per character cell, doubling horizontal resolution and tripling vertical resolution
+-- (e.g. a 51x19 terminal becomes a 102x57 pixel framebuffer).
+
 local COLOR_INT_TO_HEX = {
     [1] = "0",     [2] = "1",     [4] = "2",     [8] = "3",
     [16] = "4",    [32] = "5",    [64] = "6",    [128] = "7",
@@ -562,6 +566,33 @@ local HEX_TO_COLOR_INT = {
     ["c"] = 4096,  ["d"] = 8192,  ["e"] = 16384, ["f"] = 32768
 }
 
+-- Standard CC:Tweaked 16-color palette RGB values for Sanjuuni-style 2-color block quantization
+local PALETTE_RGB = {
+    ["0"] = { 240, 240, 240 }, ["1"] = { 242, 178,  51 },
+    ["2"] = { 229, 127, 216 }, ["3"] = { 153, 178, 242 },
+    ["4"] = { 222, 222, 108 }, ["5"] = { 127, 204,  25 },
+    ["6"] = { 242, 178, 204 }, ["7"] = {  76,  76,  76 },
+    ["8"] = { 153, 153, 153 }, ["9"] = {  76, 153, 178 },
+    ["a"] = { 178, 102, 229 }, ["b"] = {  51, 102, 204 },
+    ["c"] = { 127, 102,  76 }, ["d"] = {  87, 166,  78 },
+    ["e"] = { 204,  76,  76 }, ["f"] = {  17,  17,  17 }
+}
+
+local TELETEXT_CHARS = {}
+for mask = 0, 31 do
+    TELETEXT_CHARS[mask] = string.char(128 + mask)
+end
+
+local function colorDistSq(cA, cB)
+    if cA == cB then return 0 end
+    local rgbA = PALETTE_RGB[cA] or PALETTE_RGB["f"]
+    local rgbB = PALETTE_RGB[cB] or PALETTE_RGB["f"]
+    local dr = rgbA[1] - rgbB[1]
+    local dg = rgbA[2] - rgbB[2]
+    local db = rgbA[3] - rgbB[3]
+    return dr * dr + dg * dg + db * db
+end
+
 local function toBlitHex(col, defaultHex)
     defaultHex = defaultHex or "0"
     if col == nil then return defaultHex end
@@ -576,108 +607,144 @@ local function toBlitHex(col, defaultHex)
     return defaultHex
 end
 
-local fbWidth, fbHeight = 51, 19
+-- Built-in 3x5 Pixel Bitmap Font (each glyph is 15 bits: 5 rows of 3 bits, MSB top-left)
+local FONT_3X5 = {
+    [" "] = { 0,0,0, 0,0,0, 0,0,0, 0,0,0, 0,0,0 },
+    ["!"] = { 0,1,0, 0,1,0, 0,1,0, 0,0,0, 0,1,0 },
+    ['"'] = { 1,0,1, 1,0,1, 0,0,0, 0,0,0, 0,0,0 },
+    ["#"] = { 1,0,1, 1,1,1, 1,0,1, 1,1,1, 1,0,1 },
+    ["'"] = { 0,1,0, 0,1,0, 0,0,0, 0,0,0, 0,0,0 },
+    ["("] = { 0,1,1, 1,0,0, 1,0,0, 1,0,0, 0,1,1 },
+    [")"] = { 1,1,0, 0,0,1, 0,0,1, 0,0,1, 1,1,0 },
+    ["*"] = { 1,0,1, 0,1,0, 1,1,1, 0,1,0, 1,0,1 },
+    ["+"] = { 0,0,0, 0,1,0, 1,1,1, 0,1,0, 0,0,0 },
+    [","] = { 0,0,0, 0,0,0, 0,0,0, 0,1,0, 1,0,0 },
+    ["-"] = { 0,0,0, 0,0,0, 1,1,1, 0,0,0, 0,0,0 },
+    ["."] = { 0,0,0, 0,0,0, 0,0,0, 0,0,0, 0,1,0 },
+    ["/"] = { 0,0,1, 0,0,1, 0,1,0, 1,0,0, 1,0,0 },
+    ["0"] = { 1,1,1, 1,0,1, 1,0,1, 1,0,1, 1,1,1 },
+    ["1"] = { 0,1,0, 1,1,0, 0,1,0, 0,1,0, 1,1,1 },
+    ["2"] = { 1,1,1, 0,0,1, 1,1,1, 1,0,0, 1,1,1 },
+    ["3"] = { 1,1,1, 0,0,1, 0,1,1, 0,0,1, 1,1,1 },
+    ["4"] = { 1,0,1, 1,0,1, 1,1,1, 0,0,1, 0,0,1 },
+    ["5"] = { 1,1,1, 1,0,0, 1,1,1, 0,0,1, 1,1,1 },
+    ["6"] = { 1,1,1, 1,0,0, 1,1,1, 1,0,1, 1,1,1 },
+    ["7"] = { 1,1,1, 0,0,1, 0,1,0, 0,1,0, 0,1,0 },
+    ["8"] = { 1,1,1, 1,0,1, 1,1,1, 1,0,1, 1,1,1 },
+    ["9"] = { 1,1,1, 1,0,1, 1,1,1, 0,0,1, 1,1,1 },
+    [":"] = { 0,0,0, 0,1,0, 0,0,0, 0,1,0, 0,0,0 },
+    [";"] = { 0,0,0, 0,1,0, 0,0,0, 0,1,0, 1,0,0 },
+    ["<"] = { 0,0,1, 0,1,0, 1,0,0, 0,1,0, 0,0,1 },
+    ["="] = { 0,0,0, 1,1,1, 0,0,0, 1,1,1, 0,0,0 },
+    [">"] = { 1,0,0, 0,1,0, 0,0,1, 0,1,0, 1,0,0 },
+    ["?"] = { 1,1,1, 0,0,1, 0,1,1, 0,0,0, 0,1,0 },
+    ["["] = { 1,1,1, 1,0,0, 1,0,0, 1,0,0, 1,1,1 },
+    ["]"] = { 1,1,1, 0,0,1, 0,0,1, 0,0,1, 1,1,1 },
+    ["_"] = { 0,0,0, 0,0,0, 0,0,0, 0,0,0, 1,1,1 },
+    ["A"] = { 0,1,0, 1,0,1, 1,1,1, 1,0,1, 1,0,1 },
+    ["B"] = { 1,1,0, 1,0,1, 1,1,0, 1,0,1, 1,1,0 },
+    ["C"] = { 0,1,1, 1,0,0, 1,0,0, 1,0,0, 0,1,1 },
+    ["D"] = { 1,1,0, 1,0,1, 1,0,1, 1,0,1, 1,1,0 },
+    ["E"] = { 1,1,1, 1,0,0, 1,1,0, 1,0,0, 1,1,1 },
+    ["F"] = { 1,1,1, 1,0,0, 1,1,0, 1,0,0, 1,0,0 },
+    ["G"] = { 0,1,1, 1,0,0, 1,0,1, 1,0,1, 0,1,1 },
+    ["H"] = { 1,0,1, 1,0,1, 1,1,1, 1,0,1, 1,0,1 },
+    ["I"] = { 1,1,1, 0,1,0, 0,1,0, 0,1,0, 1,1,1 },
+    ["J"] = { 1,1,1, 0,1,0, 0,1,0, 1,1,0, 0,1,0 },
+    ["K"] = { 1,0,1, 1,0,1, 1,1,0, 1,0,1, 1,0,1 },
+    ["L"] = { 1,0,0, 1,0,0, 1,0,0, 1,0,0, 1,1,1 },
+    ["M"] = { 1,0,1, 1,1,1, 1,0,1, 1,0,1, 1,0,1 },
+    ["N"] = { 1,1,1, 1,0,1, 1,0,1, 1,0,1, 1,0,1 },
+    ["O"] = { 0,1,0, 1,0,1, 1,0,1, 1,0,1, 0,1,0 },
+    ["P"] = { 1,1,0, 1,0,1, 1,1,0, 1,0,0, 1,0,0 },
+    ["Q"] = { 0,1,0, 1,0,1, 1,0,1, 1,1,1, 0,1,1 },
+    ["R"] = { 1,1,0, 1,0,1, 1,1,0, 1,0,1, 1,0,1 },
+    ["S"] = { 0,1,1, 1,0,0, 0,1,0, 0,0,1, 1,1,0 },
+    ["T"] = { 1,1,1, 0,1,0, 0,1,0, 0,1,0, 0,1,0 },
+    ["U"] = { 1,0,1, 1,0,1, 1,0,1, 1,0,1, 1,1,1 },
+    ["V"] = { 1,0,1, 1,0,1, 1,0,1, 1,0,1, 0,1,0 },
+    ["W"] = { 1,0,1, 1,0,1, 1,0,1, 1,1,1, 1,0,1 },
+    ["X"] = { 1,0,1, 1,0,1, 0,1,0, 1,0,1, 1,0,1 },
+    ["Y"] = { 1,0,1, 1,0,1, 0,1,0, 0,1,0, 0,1,0 },
+    ["Z"] = { 1,1,1, 0,0,1, 0,1,0, 1,0,0, 1,1,1 }
+}
+
+local termW, termH = 51, 19
 if rawTerm and rawTerm.getSize then
     local w, h = rawTerm.getSize()
     if type(w) == "number" and type(h) == "number" and w > 0 and h > 0 then
-        fbWidth, fbHeight = math.floor(w), math.floor(h)
+        termW, termH = math.floor(w), math.floor(h)
     end
 end
 
-local fbChars = {}
-local fbFg = {}
-local fbBg = {}
+-- Sub-pixel dimensions: 2 pixels per terminal column, 3 pixels per terminal row
+local fbWidth  = termW * 2
+local fbHeight = termH * 3
+
+local fbPixels = {}
+local frontPixelRows = {}
 local frontTextRows = {}
 local frontFgRows = {}
 local frontBgRows = {}
+local backDrawnTexts = {}
+local frontDrawnTexts = {}
 local presentCount = 0
 
-local function initFramebufferRows(bgHex, fgHex, ch)
+local function initPixelBuffer(bgHex)
     bgHex = toBlitHex(bgHex, "f")
-    fgHex = toBlitHex(fgHex, "0")
-    ch = (type(ch) == "string" and #ch > 0) and ch:sub(1, 1) or " "
     for y = 1, fbHeight do
-        local cRow, fRow, bRow = {}, {}, {}
+        local row = {}
         for x = 1, fbWidth do
-            cRow[x] = ch
-            fRow[x] = fgHex
-            bRow[x] = bgHex
+            row[x] = bgHex
         end
-        fbChars[y] = cRow
-        fbFg[y] = fRow
-        fbBg[y] = bRow
+        fbPixels[y] = row
     end
+    backDrawnTexts = {}
 end
 
-initFramebufferRows("f", "0", " ")
+initPixelBuffer("f")
 
 local function fbGetSize()
-    return fbWidth, fbHeight
+    return fbWidth, fbHeight, termW, termH
 end
 
-local function fbClear(bgColor, fgColor, fillChar)
-    initFramebufferRows(bgColor or "f", fgColor or "0", fillChar or " ")
+local function fbClear(bgColor)
+    initPixelBuffer(bgColor or "f")
     return true
 end
 
-local function fbSetCell(x, y, char, fgColor, bgColor)
+local function fbSetPixel(x, y, color)
     x = math.floor(tonumber(x) or 0)
     y = math.floor(tonumber(y) or 0)
     if x < 1 or x > fbWidth or y < 1 or y > fbHeight then
         return false
     end
-    if char ~= nil then
-        local s = tostring(char)
-        fbChars[y][x] = (#s > 0) and s:sub(1, 1) or " "
-    end
-    if fgColor ~= nil then
-        fbFg[y][x] = toBlitHex(fgColor, fbFg[y][x])
-    end
-    if bgColor ~= nil then
-        fbBg[y][x] = toBlitHex(bgColor, fbBg[y][x])
-    end
+    fbPixels[y][x] = toBlitHex(color, fbPixels[y][x])
     return true
 end
 
-local function fbGetCell(x, y)
+-- Alias for compatibility: fbSetCell(x, y, charOrColor, fgColor, bgColor)
+local function fbSetCell(x, y, charOrColor, fgColor, bgColor)
+    local col = fgColor or bgColor or charOrColor or "0"
+    return fbSetPixel(x, y, col)
+end
+
+local function fbGetPixel(x, y)
     x = math.floor(tonumber(x) or 0)
     y = math.floor(tonumber(y) or 0)
     if x < 1 or x > fbWidth or y < 1 or y > fbHeight then
         return nil
     end
-    return fbChars[y][x], fbFg[y][x], fbBg[y][x]
+    return fbPixels[y][x]
 end
 
-local function fbWriteText(x, y, text, fgColor, bgColor)
-    x = math.floor(tonumber(x) or 1)
-    y = math.floor(tonumber(y) or 1)
-    text = tostring(text or "")
-    if y < 1 or y > fbHeight or #text == 0 then
-        return false
-    end
-    local fgHex = fgColor and toBlitHex(fgColor, "0") or nil
-    local bgHex = bgColor and toBlitHex(bgColor, "f") or nil
-    local cRow, fRow, bRow = fbChars[y], fbFg[y], fbBg[y]
-    for i = 1, #text do
-        local cx = x + i - 1
-        if cx >= 1 and cx <= fbWidth then
-            cRow[cx] = text:sub(i, i)
-            if fgHex then fRow[cx] = fgHex end
-            if bgHex then bRow[cx] = bgHex end
-        end
-    end
-    return true
-end
-
-local function fbFillRect(x, y, w, h, char, fgColor, bgColor)
+local function fbFillRect(x, y, w, h, colorOrChar, fgColor, bgColor)
     x = math.floor(tonumber(x) or 1)
     y = math.floor(tonumber(y) or 1)
     w = math.floor(tonumber(w) or 0)
     h = math.floor(tonumber(h) or 0)
     if w <= 0 or h <= 0 then return false end
-    local ch = (char ~= nil and #tostring(char) > 0) and tostring(char):sub(1, 1) or " "
-    local fgHex = fgColor and toBlitHex(fgColor, "0") or nil
-    local bgHex = bgColor and toBlitHex(bgColor, "f") or nil
+    local colHex = toBlitHex(bgColor or fgColor or colorOrChar, "f")
 
     local x0 = math.max(1, x)
     local y0 = math.max(1, y)
@@ -685,39 +752,142 @@ local function fbFillRect(x, y, w, h, char, fgColor, bgColor)
     local y1 = math.min(fbHeight, y + h - 1)
 
     for py = y0, y1 do
-        local cRow, fRow, bRow = fbChars[py], fbFg[py], fbBg[py]
+        local row = fbPixels[py]
         for px = x0, x1 do
-            cRow[px] = ch
-            if fgHex then fRow[px] = fgHex end
-            if bgHex then bRow[px] = bgHex end
+            row[px] = colHex
         end
     end
     return true
 end
 
-local function fbBlitRow(x, y, text, fgStr, bgStr)
+local function fbDrawLine(x0, y0, x1, y1, color)
+    x0 = math.floor((tonumber(x0) or 1) + 0.5)
+    y0 = math.floor((tonumber(y0) or 1) + 0.5)
+    x1 = math.floor((tonumber(x1) or 1) + 0.5)
+    y1 = math.floor((tonumber(y1) or 1) + 0.5)
+    local colHex = toBlitHex(color, "0")
+    local dx = math.abs(x1 - x0)
+    local dy = -math.abs(y1 - y0)
+    local sx = (x0 < x1) and 1 or -1
+    local sy = (y0 < y1) and 1 or -1
+    local err = dx + dy
+    local guard = 0
+    while true do
+        if x0 >= 1 and x0 <= fbWidth and y0 >= 1 and y0 <= fbHeight then
+            fbPixels[y0][x0] = colHex
+        end
+        if x0 == x1 and y0 == y1 then break end
+        local e2 = 2 * err
+        if e2 >= dy then err = err + dy; x0 = x0 + sx end
+        if e2 <= dx then err = err + dx; y0 = y0 + sy end
+        guard = guard + 1
+        if guard > 1024 then break end
+    end
+    return true
+end
+
+-- Renders text pixel-by-pixel into fbPixels using the built-in 3x5 pixel bitmap font
+local function fbWriteText(x, y, text, fgColor, bgColor, scale)
     x = math.floor(tonumber(x) or 1)
     y = math.floor(tonumber(y) or 1)
     text = tostring(text or "")
-    fgStr = tostring(fgStr or "")
-    bgStr = tostring(bgStr or "")
-    if y < 1 or y > fbHeight or #text == 0 then
+    scale = math.max(1, math.floor(tonumber(scale) or 1))
+    if #text == 0 then return false end
+
+    local fgHex = toBlitHex(fgColor, "0")
+    local bgHex = bgColor and toBlitHex(bgColor, "f") or nil
+    backDrawnTexts[#backDrawnTexts + 1] = text
+
+    local curX = x
+    for i = 1, #text do
+        local ch = text:sub(i, i):upper()
+        local glyph = FONT_3X5[ch] or FONT_3X5["?"]
+        if bgHex then
+            fbFillRect(curX, y, 4 * scale, 5 * scale, bgHex)
+        end
+        for gy = 0, 4 do
+            for gx = 0, 2 do
+                if glyph[gy * 3 + gx + 1] == 1 then
+                    for sy = 0, scale - 1 do
+                        for sx = 0, scale - 1 do
+                            fbSetPixel(curX + gx * scale + sx, y + gy * scale + sy, fgHex)
+                        end
+                    end
+                end
+            end
+        end
+        curX = curX + 4 * scale
+    end
+    return true
+end
+
+-- Blit a horizontal row of pixel hex characters ("0".."f") into fbPixels[y] starting at x
+local function fbBlitPixelRow(x, y, pixelHexStr)
+    x = math.floor(tonumber(x) or 1)
+    y = math.floor(tonumber(y) or 1)
+    pixelHexStr = tostring(pixelHexStr or "")
+    if y < 1 or y > fbHeight or #pixelHexStr == 0 then
         return false
     end
-    local cRow, fRow, bRow = fbChars[y], fbFg[y], fbBg[y]
-    for i = 1, #text do
-        local cx = x + i - 1
-        if cx >= 1 and cx <= fbWidth then
-            cRow[cx] = text:sub(i, i)
-            if i <= #fgStr then
-                fRow[cx] = toBlitHex(fgStr:sub(i, i), fRow[cx])
-            end
-            if i <= #bgStr then
-                bRow[cx] = toBlitHex(bgStr:sub(i, i), bRow[cx])
-            end
+    local row = fbPixels[y]
+    for i = 1, #pixelHexStr do
+        local px = x + i - 1
+        if px >= 1 and px <= fbWidth then
+            row[px] = toBlitHex(pixelHexStr:sub(i, i), row[px])
         end
     end
     return true
+end
+
+-- Sanjuuni-style 2x3 sub-pixel block quantizer: converts a 2x3 block of pixel colors
+-- into (teletextChar, fgHex, bgHex) where teletextChar is in \128..\159
+local function encodeTeletextBlock(p1, p2, p3, p4, p5, p6)
+    -- Fast path: all 6 sub-pixels share the exact same color
+    if p1 == p6 and p2 == p6 and p3 == p6 and p4 == p6 and p5 == p6 then
+        return "\128", p6, p6
+    end
+
+    -- Count frequencies of colors in this 2x3 block
+    local counts = {}
+    local order = {}
+    local pix = { p1, p2, p3, p4, p5, p6 }
+    for i = 1, 6 do
+        local c = pix[i]
+        if not counts[c] then
+            counts[c] = 1
+            order[#order + 1] = c
+        else
+            counts[c] = counts[c] + 1
+        end
+    end
+
+    local c1, c2 = order[1], order[2] or order[1]
+    if #order > 2 then
+        table.sort(order, function(a, b) return counts[a] > counts[b] end)
+        c1, c2 = order[1], order[2]
+        for i = 1, 6 do
+            local p = pix[i]
+            if p ~= c1 and p ~= c2 then
+                if colorDistSq(p, c1) <= colorDistSq(p, c2) then
+                    pix[i] = c1
+                else
+                    pix[i] = c2
+                end
+            end
+        end
+    end
+
+    -- In CC:Tweaked teletext characters 128..159, sub-pixel 6 (bottom-right) is ALWAYS background (bit 5 = 0)
+    local bg = pix[6]
+    local fg = (bg == c1) and c2 or c1
+    local mask = 0
+    if pix[1] == fg then mask = mask + 1 end
+    if pix[2] == fg then mask = mask + 2 end
+    if pix[3] == fg then mask = mask + 4 end
+    if pix[4] == fg then mask = mask + 8 end
+    if pix[5] == fg then mask = mask + 16 end
+
+    return TELETEXT_CHARS[mask], fg, bg
 end
 
 local function fbPresent()
@@ -725,17 +895,45 @@ local function fbPresent()
     if rawTerm and rawTerm.setCursorBlink then
         rawTerm.setCursorBlink(false)
     end
-    for y = 1, fbHeight do
-        local tRow = table.concat(fbChars[y])
-        local fRow = table.concat(fbFg[y])
-        local bRow = table.concat(fbBg[y])
-        frontTextRows[y] = tRow
-        frontFgRows[y] = fRow
-        frontBgRows[y] = bRow
+
+    for py = 1, fbHeight do
+        frontPixelRows[py] = table.concat(fbPixels[py])
+    end
+
+    frontDrawnTexts = {}
+    for i = 1, #backDrawnTexts do
+        frontDrawnTexts[i] = backDrawnTexts[i]
+    end
+
+    for cy = 1, termH do
+        local py0 = (cy - 1) * 3 + 1
+        local r1 = fbPixels[py0]
+        local r2 = fbPixels[py0 + 1]
+        local r3 = fbPixels[py0 + 2]
+        local tChars, tFg, tBg = {}, {}, {}
+
+        for cx = 1, termW do
+            local px0 = (cx - 1) * 2 + 1
+            local ch, fg, bg = encodeTeletextBlock(
+                r1[px0], r1[px0 + 1],
+                r2[px0], r2[px0 + 1],
+                r3[px0], r3[px0 + 1]
+            )
+            tChars[cx] = ch
+            tFg[cx] = fg
+            tBg[cx] = bg
+        end
+
+        local tRow = table.concat(tChars)
+        local fRow = table.concat(tFg)
+        local bRow = table.concat(tBg)
+        frontTextRows[cy] = tRow
+        frontFgRows[cy] = fRow
+        frontBgRows[cy] = bRow
 
         if rawTerm then
             if rawTerm.setCursorPos then
-                rawTerm.setCursorPos(1, y)
+                rawTerm.setCursorPos(1, cy)
             end
             if rawTerm.blit then
                 rawTerm.blit(tRow, fRow, bRow)
@@ -762,15 +960,19 @@ local function fbSubmitBatch(commands)
         if type(cmd) == "table" then
             local op = cmd.op
             if op == "clear" then
-                fbClear(cmd.bg, cmd.fg, cmd.char)
-            elseif op == "cell" then
-                fbSetCell(cmd.x, cmd.y, cmd.char, cmd.fg, cmd.bg)
+                fbClear(cmd.bg or cmd.color)
+            elseif op == "pixel" or op == "cell" then
+                fbSetPixel(cmd.x, cmd.y, cmd.color or cmd.fg or cmd.bg)
+            elseif op == "line" then
+                fbDrawLine(cmd.x0, cmd.y0, cmd.x1, cmd.y1, cmd.color or cmd.fg)
             elseif op == "text" then
-                fbWriteText(cmd.x, cmd.y, cmd.text, cmd.fg, cmd.bg)
+                fbWriteText(cmd.x, cmd.y, cmd.text, cmd.fg, cmd.bg, cmd.scale)
             elseif op == "rect" then
-                fbFillRect(cmd.x, cmd.y, cmd.w, cmd.h, cmd.char, cmd.fg, cmd.bg)
-            elseif op == "blit" then
-                fbBlitRow(cmd.x, cmd.y, cmd.text, cmd.fg, cmd.bg)
+                fbFillRect(cmd.x, cmd.y, cmd.w, cmd.h, cmd.color or cmd.bg or cmd.fg)
+            elseif op == "blitPixels" or op == "blit" then
+                fbBlitPixelRow(cmd.x, cmd.y, cmd.pixels or cmd.fg or cmd.bg)
+            elseif op == "recordText" then
+                backDrawnTexts[#backDrawnTexts + 1] = tostring(cmd.text or "")
             elseif op == "present" then
                 fbPresent()
             end
@@ -780,30 +982,53 @@ local function fbSubmitBatch(commands)
 end
 
 local function fbGetFrontbufferSnapshot()
-    local textCopy, fgCopy, bgCopy = {}, {}, {}
-    for y = 1, fbHeight do
-        textCopy[y] = frontTextRows[y] or table.concat(fbChars[y])
-        fgCopy[y] = frontFgRows[y] or table.concat(fbFg[y])
-        bgCopy[y] = frontBgRows[y] or table.concat(fbBg[y])
+    local pixCopy, textCopy, fgCopy, bgCopy, drawnCopy = {}, {}, {}, {}, {}
+    for py = 1, fbHeight do
+        pixCopy[py] = frontPixelRows[py] or table.concat(fbPixels[py])
+    end
+    for cy = 1, termH do
+        textCopy[cy] = frontTextRows[cy] or ""
+        fgCopy[cy] = frontFgRows[cy] or ""
+        bgCopy[cy] = frontBgRows[cy] or ""
+    end
+    for i = 1, #frontDrawnTexts do
+        drawnCopy[i] = frontDrawnTexts[i]
     end
     return {
         width = fbWidth,
         height = fbHeight,
+        termWidth = termW,
+        termHeight = termH,
         presentCount = presentCount,
+        pixelRows = pixCopy,
         textRows = textCopy,
         fgRows = fgCopy,
-        bgRows = bgCopy
+        bgRows = bgCopy,
+        drawnTexts = drawnCopy
     }
 end
 
 -- Hardcoded BIOS Boot Screen:
--- Clears the framebuffer to black and draws a single white uppercase letter "J"
--- centered horizontally and vertically on the screen.
+-- Clears the pixelwise framebuffer to black ("f") and draws a crisp white ("0")
+-- uppercase letter "J" centered horizontally and vertically in pixel space.
 local function fbRenderBootSplash()
-    fbClear("f", "0", " ")
+    fbClear("f")
     local centerX = math.floor((fbWidth + 1) / 2)
     local centerY = math.floor((fbHeight + 1) / 2)
-    fbSetCell(centerX, centerY, "J", "0", "f")
+    -- Render a crisp 5x7 pixel white uppercase "J" centered at (centerX, centerY)
+    -- Top bar: dx = -1..+2, dy = -3
+    for dx = -1, 2 do
+        fbSetPixel(centerX + dx, centerY - 3, "0")
+    end
+    -- Vertical stem passing through exact center (centerX, centerY): dx = 0, dy = -2..+2
+    for dy = -2, 2 do
+        fbSetPixel(centerX, centerY + dy, "0")
+    end
+    -- Left hook: dx = -2, dy = +1..+2 and bottom curve dx = -1, dy = +3
+    fbSetPixel(centerX - 2, centerY + 1, "0")
+    fbSetPixel(centerX - 2, centerY + 2, "0")
+    fbSetPixel(centerX - 1, centerY + 3, "0")
+    backDrawnTexts[#backDrawnTexts + 1] = "J"
     fbPresent()
     return centerX, centerY
 end
@@ -812,11 +1037,16 @@ local FB_INTERNAL = {
     getSize = fbGetSize,
     toBlitHex = toBlitHex,
     clear = fbClear,
+    setPixel = fbSetPixel,
+    getPixel = fbGetPixel,
     setCell = fbSetCell,
-    getCell = fbGetCell,
+    getCell = fbGetPixel,
+    drawLine = fbDrawLine,
     writeText = fbWriteText,
+    drawText = fbWriteText,
     fillRect = fbFillRect,
-    blitRow = fbBlitRow,
+    blitPixelRow = fbBlitPixelRow,
+    blitRow = fbBlitPixelRow,
     submitBatch = fbSubmitBatch,
     present = fbPresent,
     getFrontbufferSnapshot = fbGetFrontbufferSnapshot,
@@ -850,13 +1080,10 @@ local function biosGetBootLogs()
 end
 
 local function biosPanic(component, reason)
-    fbClear("e", "0", " ")
-    fbWriteText(2, 2, "==========================================", "0", "e")
-    fbWriteText(2, 3, "         CC-jOS SECURITY PANIC            ", "0", "e")
-    fbWriteText(2, 4, "==========================================", "0", "e")
-    fbWriteText(2, 6, "Component : " .. tostring(component), "0", "e")
-    fbWriteText(2, 7, "Reason    : " .. tostring(reason):sub(1, fbWidth - 14), "0", "e")
-    fbWriteText(2, 9, "System halted to protect platform integrity.", "0", "e")
+    fbClear("e")
+    fbWriteText(3, 3, "CC-JOS PANIC", "0", "e", 1)
+    fbWriteText(3, 11, tostring(component):upper(), "4", "e", 1)
+    fbWriteText(3, 19, tostring(reason):sub(1, 24), "0", "e", 1)
     fbPresent()
     error("CC_JOS_PANIC:" .. tostring(component) .. ":" .. tostring(reason), 0)
 end
@@ -902,7 +1129,8 @@ local rawHW = {
         computerLabel = rawOS.computerLabel or rawOS.getComputerLabel,
         shutdown = rawOS.shutdown,
         reboot = rawOS.reboot,
-        _testHook = rawOS._testHook
+        _testHook = rawOS._testHook,
+        _testMode = rawOS._testMode
     },
     http = rawHTTP,
     colors = rawColors

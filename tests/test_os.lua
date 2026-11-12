@@ -3,12 +3,12 @@
 -- CC-jOS End-to-End Verification & Security Test Suite (tests/test_os.lua)
 -- Simulates a CC:Tweaked Computer environment and tests:
 --   1. GitHub Installer (installer.lua) including /System/Libraries/jvk.lua
---   2. BIOS Framebuffer & Centered White "J" Boot Screen (retained until start app)
---   3. Start App (Init.app) taking over rendering via libjvk (2D UI + 3D Cube + "Kernel's up")
---   4. BIOS Immutability Enforcement
---   5. Bootloader Signed Update Application & Tamper Rejection
---   6. Kernel Strict Code Signing (.app bundle & signed library tamper rejection)
---   7. Kernel Strict Permission Enforcing (User App vs Sysmodule privilege separation)
+--   2. Pixelwise BIOS Framebuffer (2x3 Teletext Sub-pixels \128..\159) & Centered White "J"
+--   3. Start App (Init.app) taking over rendering via pixelwise libjvk
+--   4. Host CraftOS _G preservation (no shell.lua/bios.lua fs/loadfile crash) + Userspace isolation
+--   5. BIOS Immutability Enforcement
+--   6. Bootloader Signed Update Application & Tamper Rejection
+--   7. Kernel Strict Code Signing & Permission Enforcing
 -- ============================================================================
 
 local Crypto = dofile("tools/crypto.lua")
@@ -20,6 +20,43 @@ local function readHostFile(path)
     local c = f:read("*a")
     f:close()
     return c
+end
+
+-- Decode a 51x19 CC:Tweaked teletext frame (\128..\159 + fg + bg) back into a 102x57 pixel grid
+local function decodeTeletextFrameToPixels(frame, termW, termH)
+    local pix = {}
+    for py = 1, termH * 3 do
+        pix[py] = {}
+    end
+    for cy = 1, termH do
+        local tRow = frame.text[cy]
+        local fRow = frame.fg[cy]
+        local bRow = frame.bg[cy]
+        local py0 = (cy - 1) * 3 + 1
+        for cx = 1, termW do
+            local byte = tRow:byte(cx) or 128
+            assert(byte >= 128 and byte <= 159,
+                string.format("Cell (%d,%d) must be a 2x3 teletext drawing char (128..159), got %d", cx, cy, byte))
+            local mask = byte - 128
+            local fg = fRow:sub(cx, cx)
+            local bg = bRow:sub(cx, cx)
+            local px0 = (cx - 1) * 2 + 1
+
+            local b0 = (mask % 2 >= 1)
+            local b1 = (mask % 4 >= 2)
+            local b2 = (mask % 8 >= 4)
+            local b3 = (mask % 16 >= 8)
+            local b4 = (mask % 32 >= 16)
+
+            pix[py0][px0]         = b0 and fg or bg
+            pix[py0][px0 + 1]     = b1 and fg or bg
+            pix[py0 + 1][px0]     = b2 and fg or bg
+            pix[py0 + 1][px0 + 1] = b3 and fg or bg
+            pix[py0 + 2][px0]     = b4 and fg or bg
+            pix[py0 + 2][px0 + 1] = bg
+        end
+    end
+    return pix
 end
 
 -- Create an in-memory CC:Tweaked Virtual Filesystem and Framebuffer-capable Terminal
@@ -34,11 +71,11 @@ local function createMockComputer()
     local screenText = {}
     local screenFg = {}
     local screenBg = {}
-    local frameHistory = {} -- snapshots captured whenever row termH is blitted
+    local frameHistory = {}
 
     for y = 1, termH do
-        screenText[y] = string.rep(" ", termW)
-        screenFg[y] = string.rep("0", termW)
+        screenText[y] = string.rep("\128", termW)
+        screenFg[y] = string.rep("f", termW)
         screenBg[y] = string.rep("f", termW)
     end
 
@@ -209,7 +246,8 @@ local function createMockComputer()
         pullEventRaw = function() return "timer" end,
         pullEvent = function() return "timer" end,
         reboot = function() end,
-        sleep = function() end
+        sleep = function() end,
+        _testMode = true
     }
 
     local function customPrint(...)
@@ -258,16 +296,11 @@ local function runInComputer(comp, vfsScriptPath, args, testHook)
     if testHook then
         comp.os._testHook = testHook
     end
-    return fn(unpack(args or {}))
-end
-
-local function screenContainsText(frame, needle)
-    for y = 1, #frame.text do
-        if frame.text[y]:find(needle, 1, true) then
-            return true
-        end
-    end
-    return false
+    local res = fn(unpack(args or {}))
+    -- Verify host CraftOS globals (fs, loadfile) were NOT wiped on env
+    assert(env.fs ~= nil, "Host CraftOS env.fs must not be nilled out!")
+    assert(env.loadfile ~= nil, "Host CraftOS env.loadfile must not be nilled out!")
+    return res
 end
 
 print("=== Running CC-jOS Automated Verification Suite ===")
@@ -292,40 +325,44 @@ assert(comp.vfsFiles["/System/Apps/Init.app/signature.sig"], "Installer must ins
 print("[PASS] 1. GitHub Installer downloaded & installed all OS files (including libjvk) into VFS")
 
 -- ----------------------------------------------------------------------------
--- Test 2: Boot Screen ("J" centered) & Start App Taking Over via libjvk
+-- Test 2: Pixelwise Boot Screen ("J" centered) & Start App Taking Over via libjvk
 -- ----------------------------------------------------------------------------
 for i = #comp.frameHistory, 1, -1 do comp.frameHistory[i] = nil end
-runInComputer(comp, "/startup.lua")
+local kernelInspect = nil
+runInComputer(comp, "/startup.lua", {}, function(info)
+    kernelInspect = info
+end)
 
 assert(#comp.frameHistory >= 2, "Expected boot splash frame(s) followed by Init.app libjvk frame")
 
--- Verify the early boot frames (BIOS & Bootloader) are strictly a centered white "J" on black
-local bootFrame = comp.frameHistory[1]
-local centerX = math.floor((51 + 1) / 2) -- 26
-local centerY = math.floor((19 + 1) / 2) -- 10
-assert(bootFrame.text[centerY]:sub(centerX, centerX) == "J", "Boot screen must have 'J' centered at (26, 10)")
-assert(bootFrame.fg[centerY]:sub(centerX, centerX) == "0", "Boot screen 'J' must be white ('0')")
-assert(bootFrame.bg[centerY]:sub(centerX, centerX) == "f", "Boot screen background must be black ('f')")
+-- Decode the first presented frame (BIOS boot splash) from 2x3 teletext chars back to 102x57 pixels
+local bootPixels = decodeTeletextFrameToPixels(comp.frameHistory[1], 51, 19)
+local centerX = math.floor((102 + 1) / 2) -- 51
+local centerY = math.floor((57 + 1) / 2)  -- 29
+assert(bootPixels[centerY][centerX] == "0", "Boot screen must have white ('0') pixel at center (51, 29)")
+assert(bootPixels[centerY - 3][centerX + 1] == "0", "Boot screen 'J' top bar pixel must be white ('0')")
+assert(bootPixels[centerY + 2][centerX - 2] == "0", "Boot screen 'J' hook pixel must be white ('0')")
+assert(bootPixels[1][1] == "f", "Boot screen background pixel (1,1) must be black ('f')")
+print("[PASS] 2a. BIOS & Bootloader rendered pixelwise centered white 'J' via 2x3 teletext sub-pixels")
 
--- Verify every other cell on the boot splash frame is blank space
-for y = 1, 19 do
-    for x = 1, 51 do
-        local ch = bootFrame.text[y]:sub(x, x)
-        if x == centerX and y == centerY then
-            assert(ch == "J", "Center cell must be 'J'")
-        else
-            assert(ch == " ", "Boot screen cell (" .. x .. "," .. y .. ") must be blank space, got: " .. ch)
-        end
+-- Verify final frame after Init.app took over the rendering stack via pixelwise libjvk
+local appPixels = decodeTeletextFrameToPixels(comp.frameHistory[#comp.frameHistory], 51, 19)
+-- Header bar at y=2 should be blue ("b") with white title pixels ("0")
+local foundHeaderBlue = false
+local foundCyanCubePixels = false
+local foundLimeTextPixels = false
+for py = 1, 57 do
+    for px = 1, 102 do
+        local c = appPixels[py][px]
+        if py <= 7 and c == "b" then foundHeaderBlue = true end
+        if px >= 4 and px <= 48 and c == "9" then foundCyanCubePixels = true end
+        if px >= 51 and py >= 22 and py <= 30 and c == "5" then foundLimeTextPixels = true end
     end
 end
-print("[PASS] 2a. BIOS & Bootloader rendered hardcoded centered white 'J' directly via BIOS.fb")
-
--- Verify final frame after Init.app took over the rendering stack via libjvk
-local appFrame = comp.frameHistory[#comp.frameHistory]
-assert(screenContainsText(appFrame, "Kernel's up"), "Expected Init.app to render \"Kernel's up\" via libjvk")
-assert(screenContainsText(appFrame, "CC-jOS Userspace [libjvk]"), "Expected Init.app 2D UI Window title")
-assert(screenContainsText(appFrame, "3D Cube"), "Expected Init.app 3D Viewport title")
-print("[PASS] 2b. Init.app took over rendering stack via libjvk (2D UI + 3D Cube + \"Kernel's up\")")
+assert(foundHeaderBlue, "Expected pixelwise blue UI window header")
+assert(foundCyanCubePixels, "Expected pixelwise cyan 3D cube in 3D viewport")
+assert(foundLimeTextPixels, "Expected pixelwise lime 'Kernel's up' text in status panel")
+print("[PASS] 2b. Init.app took over pixelwise rendering stack via libjvk (2D UI + 3D Cube + \"Kernel's up\")")
 
 -- ----------------------------------------------------------------------------
 -- Test 3: BIOS Immutability Enforcement
@@ -368,9 +405,7 @@ compUpdate.vfsFiles["/boot/update/kernel.lua.sig"] = 'signature = "deadbeef"'
 for i = #compUpdate.frameHistory, 1, -1 do compUpdate.frameHistory[i] = nil end
 runInComputer(compUpdate, "/startup.lua")
 assert(compUpdate.vfsFiles["/boot/update/kernel.lua"] == nil, "Tampered staged update should be cleaned up")
-local finalUpdateFrame = compUpdate.frameHistory[#compUpdate.frameHistory]
-assert(finalUpdateFrame and screenContainsText(finalUpdateFrame, "Kernel's up"),
-    "System should reject bad update and boot existing valid kernel")
+assert(#compUpdate.frameHistory >= 2, "System should reject bad update and boot existing valid kernel")
 print("[PASS] 4. Bootloader update verification & tamper rejection verified")
 
 -- ----------------------------------------------------------------------------

@@ -15,17 +15,12 @@ local fb = rawHW.fb or BIOS.fb
 local rawOS = rawHW.os
 
 -- ============================================================================
--- 1. Lock Down Global Environment (_G)
+-- 1. Userspace Isolation Policy
 -- ============================================================================
--- Strip privileged ComputerCraft APIs from _G so everything above the kernel
--- is strictly isolated in userspace and must go through permission-checked syscalls.
-local PRIVILEGED_GLOBALS = {
-    "fs", "io", "http", "loadfile", "dofile",
-    "shell", "multishell", "package", "peripheral", "redstone"
-}
-for i = 1, #PRIVILEGED_GLOBALS do
-    rawset(_G, PRIVILEGED_GLOBALS[i], nil)
-end
+-- Every userspace .app bundle and system library is compiled and executed inside
+-- a strictly isolated per-process environment (createUserspaceEnvironment) with
+-- no metatable link to the host _G. Host globals (fs, loadfile, etc.) are never
+-- exposed to userspace processes.
 
 -- ============================================================================
 -- 2. Kernel State: Process Table, IPC Bus & Security Audit Log
@@ -58,28 +53,33 @@ local SYSMODULE_ONLY_PERMISSIONS = {
 
 -- Map of syscalls to their required permission capability
 local SYSCALL_PERMISSIONS = {
-    ["console.write"]  = "kernel.console",
-    ["console.print"]  = "kernel.console",
-    ["fb.info"]        = "graphics.framebuffer",
-    ["fb.clear"]       = "graphics.framebuffer",
-    ["fb.setCell"]     = "graphics.framebuffer",
-    ["fb.getCell"]     = "graphics.framebuffer",
-    ["fb.writeText"]   = "graphics.framebuffer",
-    ["fb.fillRect"]    = "graphics.framebuffer",
-    ["fb.blitRow"]     = "graphics.framebuffer",
-    ["fb.submitBatch"] = "graphics.framebuffer",
-    ["fb.present"]     = "graphics.framebuffer",
-    ["fb.snapshot"]    = "graphics.framebuffer",
-    ["process.self"]   = "process.info",
-    ["process.list"]   = "process.list",
-    ["process.spawn"]  = "process.spawn",
-    ["process.kill"]   = "process.kill",
-    ["ipc.register"]   = "ipc.register",
-    ["ipc.send"]       = "ipc.send",
-    ["ipc.recv"]       = "ipc.recv",
-    ["hw.fs"]          = "hw.fs.raw",
-    ["hw.term"]        = "hw.term.raw",
-    ["kernel.audit"]   = "kernel.audit"
+    ["console.write"]   = "kernel.console",
+    ["console.print"]   = "kernel.console",
+    ["fb.info"]         = "graphics.framebuffer",
+    ["fb.clear"]        = "graphics.framebuffer",
+    ["fb.setPixel"]     = "graphics.framebuffer",
+    ["fb.getPixel"]     = "graphics.framebuffer",
+    ["fb.setCell"]      = "graphics.framebuffer",
+    ["fb.getCell"]      = "graphics.framebuffer",
+    ["fb.drawLine"]     = "graphics.framebuffer",
+    ["fb.drawText"]     = "graphics.framebuffer",
+    ["fb.writeText"]    = "graphics.framebuffer",
+    ["fb.fillRect"]     = "graphics.framebuffer",
+    ["fb.blitPixelRow"] = "graphics.framebuffer",
+    ["fb.blitRow"]      = "graphics.framebuffer",
+    ["fb.submitBatch"]  = "graphics.framebuffer",
+    ["fb.present"]      = "graphics.framebuffer",
+    ["fb.snapshot"]     = "graphics.framebuffer",
+    ["process.self"]    = "process.info",
+    ["process.list"]    = "process.list",
+    ["process.spawn"]   = "process.spawn",
+    ["process.kill"]    = "process.kill",
+    ["ipc.register"]    = "ipc.register",
+    ["ipc.send"]        = "ipc.send",
+    ["ipc.recv"]        = "ipc.recv",
+    ["hw.fs"]           = "hw.fs.raw",
+    ["hw.term"]         = "hw.term.raw",
+    ["kernel.audit"]    = "kernel.audit"
 }
 
 -- ============================================================================
@@ -291,35 +291,41 @@ local function dispatchSyscall(pcb, syscallName, ...)
         return true
 
     elseif syscallName == "fb.info" then
-        local w, h = fb.getSize()
+        local w, h, tw, th = fb.getSize()
         return true, BIOS.createReadOnlyProxy({
             width = w,
             height = h,
+            termWidth = tw or math.floor(w / 2),
+            termHeight = th or math.floor(h / 3),
+            pixelwise = true,
             isColor = (term and term.isColor and term.isColor()) or true
         }, "FramebufferInfo")
 
     elseif syscallName == "fb.clear" then
-        fb.clear(args[1], args[2], args[3])
+        fb.clear(args[1])
         return true
 
-    elseif syscallName == "fb.setCell" then
-        return true, fb.setCell(args[1], args[2], args[3], args[4], args[5])
+    elseif syscallName == "fb.setPixel" or syscallName == "fb.setCell" then
+        return true, fb.setPixel(args[1], args[2], args[3] or args[4] or args[5])
 
-    elseif syscallName == "fb.getCell" then
-        local c, fgHex, bgHex = fb.getCell(args[1], args[2])
+    elseif syscallName == "fb.getPixel" or syscallName == "fb.getCell" then
+        local c = fb.getPixel(args[1], args[2])
         if not c then
             return false, "ERR_FB_BOUNDS: Coordinates out of range"
         end
-        return true, c, fgHex, bgHex
+        return true, c
 
-    elseif syscallName == "fb.writeText" then
-        return true, fb.writeText(args[1], args[2], args[3], args[4], args[5])
+    elseif syscallName == "fb.drawLine" then
+        return true, fb.drawLine(args[1], args[2], args[3], args[4], args[5])
+
+    elseif syscallName == "fb.drawText" or syscallName == "fb.writeText" then
+        return true, fb.writeText(args[1], args[2], args[3], args[4], args[5], args[6])
 
     elseif syscallName == "fb.fillRect" then
         return true, fb.fillRect(args[1], args[2], args[3], args[4], args[5], args[6], args[7])
 
-    elseif syscallName == "fb.blitRow" then
-        return true, fb.blitRow(args[1], args[2], args[3], args[4], args[5])
+    elseif syscallName == "fb.blitPixelRow" or syscallName == "fb.blitRow" then
+        return true, fb.blitPixelRow(args[1], args[2], args[3])
 
     elseif syscallName == "fb.submitBatch" then
         local okBatch, batchErr = fb.submitBatch(args[1])
@@ -598,6 +604,14 @@ local function runScheduler()
         end
         if aliveCount == 0 then
             break
+        end
+    end
+
+    -- On real CC:Tweaked hardware, the Kernel owns the machine and must never
+    -- return control back to CraftOS shell.lua after initial processes complete.
+    if not (rawOS and rawOS._testMode) and rawOS and rawOS.pullEventRaw then
+        while true do
+            rawOS.pullEventRaw()
         end
     end
 end

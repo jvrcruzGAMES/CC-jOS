@@ -1,7 +1,7 @@
 -- ============================================================================
 -- CC-jOS Initial Userspace Application (/System/Apps/Init.app/main.lua)
--- Takes over the rendering stack from the BIOS/Bootloader boot splash using
--- the bundled Vulkan-style 2D/3D graphics library (libjvk).
+-- Takes over the pixelwise rendering stack from the BIOS/Bootloader boot
+-- splash using the bundled Vulkan-style 2D/3D graphics library (libjvk).
 -- ============================================================================
 
 -- 1. Verify userspace privilege isolation
@@ -11,19 +11,18 @@ if okSelf and selfInfo then
     assert(not fsAllowed, "Userspace app must not have raw hardware FS permission!")
 end
 
--- 2. Confirm the hardcoded BIOS boot screen (centered white uppercase "J")
+-- 2. Confirm the hardcoded BIOS boot screen (centered white uppercase "J" in pixel space)
 --    remained intact up until this start app launched.
 local okSnap, bootSnap = syscall("fb.snapshot")
 if okSnap and bootSnap then
     local cx = math.floor((bootSnap.width + 1) / 2)
     local cy = math.floor((bootSnap.height + 1) / 2)
-    local centerChar = bootSnap.textRows[cy]:sub(cx, cx)
-    local centerFg   = bootSnap.fgRows[cy]:sub(cx, cx)
-    assert(centerChar == "J" and centerFg == "0",
-        "Expected centered white 'J' boot screen before Init.app takes over rendering!")
+    local centerPix = bootSnap.pixelRows[cy]:sub(cx, cx)
+    assert(centerPix == "0",
+        "Expected centered white 'J' boot screen in pixelwise framebuffer before Init.app takes over rendering!")
 end
 
--- 3. Take over the rendering stack using libjvk (Vulkan-style 2D & 3D UI Library)
+-- 3. Take over the pixelwise rendering stack using libjvk (Vulkan-style 2D & 3D UI Library)
 local jvk = require("jvk")
 
 local instance = jvk.createInstance({
@@ -41,9 +40,7 @@ local swapchain = jvk.createSwapchain(device)
 
 local renderPass = jvk.createRenderPass(device, {
     loadOp = jvk.LOAD_OP_CLEAR,
-    clearColor = jvk.COLORS.BLACK,
-    clearTextColor = jvk.COLORS.WHITE,
-    clearChar = " "
+    clearColor = jvk.COLORS.BLACK
 })
 
 local pipeline2D = jvk.createGraphicsPipeline(device, {
@@ -66,7 +63,7 @@ cmd:beginRenderPass({
     swapchain = swapchain
 })
 
--- Bind 2D UI Pipeline and draw the main system window
+-- Bind 2D UI Pipeline and draw the main pixelwise system window
 cmd:bindPipeline(pipeline2D)
 cmd:uiWindow({
     x = 1,
@@ -80,12 +77,12 @@ cmd:uiWindow({
     bodyColor = jvk.COLORS.BLACK
 })
 
--- Render a 3D Viewport inside the UI window using the 3D pipeline
-local vpWidth = math.min(24, math.max(12, math.floor(swapchain.width * 0.45)))
-local vpHeight = math.max(7, swapchain.height - 6)
+-- Render a 3D Viewport inside the UI window using the 3D sub-pixel pipeline
+local vpWidth = math.floor(swapchain.width * 0.43)
+local vpHeight = swapchain.height - 13
 cmd:uiViewport3D({
-    x = 3,
-    y = 3,
+    x = 4,
+    y = 10,
     w = vpWidth,
     h = vpHeight,
     title = "3D Cube",
@@ -98,25 +95,25 @@ cmd:uiViewport3D({
             jvk.mat4.rotationX(0.45)
         )
         local view = jvk.mat4.lookAt(
-            jvk.vec3.new(0, 0, 3.2),
+            jvk.vec3.new(0, 0, 3.1),
             jvk.vec3.new(0, 0, 0),
             jvk.vec3.new(0, 1, 0)
         )
         local proj = jvk.mat4.perspective(math.pi / 3, aspect, 0.1, 50.0)
         local mvp = jvk.mat4.mul(proj, jvk.mat4.mul(view, model))
 
-        subCmd:pushConstants({ mvp = mvp, fg = jvk.COLORS.CYAN, char = "*" })
+        subCmd:pushConstants({ mvp = mvp, fg = jvk.COLORS.CYAN })
         subCmd:drawMesh(cubeMesh)
         subCmd:bindPipeline(pipeline2D)
     end
 })
 
--- Render 2D status panel on the right with "Kernel's up"
-local infoX = vpWidth + 5
-local infoW = math.max(14, swapchain.width - infoX - 1)
+-- Render 2D status panel on the right with pixel-rendered "Kernel's up"
+local infoX = vpWidth + 7
+local infoW = swapchain.width - infoX - 3
 cmd:uiPanel({
     x = infoX,
-    y = 3,
+    y = 10,
     w = infoW,
     h = vpHeight,
     title = "Status",
@@ -126,7 +123,7 @@ cmd:uiPanel({
 
 cmd:uiLabel({
     x = infoX + 2,
-    y = 5,
+    y = 24,
     w = infoW - 4,
     text = "Kernel's up",
     fg = jvk.COLORS.LIME,
@@ -135,9 +132,10 @@ cmd:uiLabel({
 })
 
 cmd:uiProgressBar({
-    x = infoX + 2,
-    y = math.min(swapchain.height - 3, 8),
-    w = math.max(6, infoW - 4),
+    x = infoX + 4,
+    y = 36,
+    w = infoW - 8,
+    h = 7,
     progress = 1.0,
     fillBg = jvk.COLORS.GREEN,
     emptyBg = jvk.COLORS.GRAY,

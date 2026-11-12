@@ -1,11 +1,12 @@
 -- ============================================================================
 -- CC-jOS Graphics & UI Library: libjvk (/System/Libraries/jvk.lua)
--- Vulkan-Style 2D & 3D Rendering & UI Toolkit for CC-jOS Userspace Apps
--- Communicates exclusively with the Kernel Framebuffer via syscall("fb.*")
+-- Vulkan-Style Pixelwise 2D & 3D Rendering & UI Toolkit for CC-jOS Userspace
+-- Renders into a 2x3 sub-pixel swapchain (e.g. 102x57 pixels) and submits
+-- pixel rows to the Kernel Framebuffer via syscall("fb.*")
 -- ============================================================================
 
 local jvk = {
-    API_VERSION = "1.0.0",
+    API_VERSION = "1.1.0",
     VK_SUCCESS = 0,
     PIPELINE_BIND_POINT_GRAPHICS_2D = "GRAPHICS_2D",
     PIPELINE_BIND_POINT_GRAPHICS_3D = "GRAPHICS_3D",
@@ -58,6 +59,75 @@ local function normColor(col, fallback)
     return COLOR_MAP[col] or fallback
 end
 
+-- Built-in 3x5 Pixel Bitmap Font for crisp pixelwise UI text rendering
+local FONT_3X5 = {
+    [" "] = { 0,0,0, 0,0,0, 0,0,0, 0,0,0, 0,0,0 },
+    ["!"] = { 0,1,0, 0,1,0, 0,1,0, 0,0,0, 0,1,0 },
+    ['"'] = { 1,0,1, 1,0,1, 0,0,0, 0,0,0, 0,0,0 },
+    ["#"] = { 1,0,1, 1,1,1, 1,0,1, 1,1,1, 1,0,1 },
+    ["'"] = { 0,1,0, 0,1,0, 0,0,0, 0,0,0, 0,0,0 },
+    ["("] = { 0,1,1, 1,0,0, 1,0,0, 1,0,0, 0,1,1 },
+    [")"] = { 1,1,0, 0,0,1, 0,0,1, 0,0,1, 1,1,0 },
+    ["*"] = { 1,0,1, 0,1,0, 1,1,1, 0,1,0, 1,0,1 },
+    ["+"] = { 0,0,0, 0,1,0, 1,1,1, 0,1,0, 0,0,0 },
+    [","] = { 0,0,0, 0,0,0, 0,0,0, 0,1,0, 1,0,0 },
+    ["-"] = { 0,0,0, 0,0,0, 1,1,1, 0,0,0, 0,0,0 },
+    ["."] = { 0,0,0, 0,0,0, 0,0,0, 0,0,0, 0,1,0 },
+    ["/"] = { 0,0,1, 0,0,1, 0,1,0, 1,0,0, 1,0,0 },
+    ["0"] = { 1,1,1, 1,0,1, 1,0,1, 1,0,1, 1,1,1 },
+    ["1"] = { 0,1,0, 1,1,0, 0,1,0, 0,1,0, 1,1,1 },
+    ["2"] = { 1,1,1, 0,0,1, 1,1,1, 1,0,0, 1,1,1 },
+    ["3"] = { 1,1,1, 0,0,1, 0,1,1, 0,0,1, 1,1,1 },
+    ["4"] = { 1,0,1, 1,0,1, 1,1,1, 0,0,1, 0,0,1 },
+    ["5"] = { 1,1,1, 1,0,0, 1,1,1, 0,0,1, 1,1,1 },
+    ["6"] = { 1,1,1, 1,0,0, 1,1,1, 1,0,1, 1,1,1 },
+    ["7"] = { 1,1,1, 0,0,1, 0,1,0, 0,1,0, 0,1,0 },
+    ["8"] = { 1,1,1, 1,0,1, 1,1,1, 1,0,1, 1,1,1 },
+    ["9"] = { 1,1,1, 1,0,1, 1,1,1, 0,0,1, 1,1,1 },
+    [":"] = { 0,0,0, 0,1,0, 0,0,0, 0,1,0, 0,0,0 },
+    [";"] = { 0,0,0, 0,1,0, 0,0,0, 0,1,0, 1,0,0 },
+    ["<"] = { 0,0,1, 0,1,0, 1,0,0, 0,1,0, 0,0,1 },
+    ["="] = { 0,0,0, 1,1,1, 0,0,0, 1,1,1, 0,0,0 },
+    [">"] = { 1,0,0, 0,1,0, 0,0,1, 0,1,0, 1,0,0 },
+    ["?"] = { 1,1,1, 0,0,1, 0,1,1, 0,0,0, 0,1,0 },
+    ["["] = { 1,1,1, 1,0,0, 1,0,0, 1,0,0, 1,1,1 },
+    ["]"] = { 1,1,1, 0,0,1, 0,0,1, 0,0,1, 1,1,1 },
+    ["_"] = { 0,0,0, 0,0,0, 0,0,0, 0,0,0, 1,1,1 },
+    ["A"] = { 0,1,0, 1,0,1, 1,1,1, 1,0,1, 1,0,1 },
+    ["B"] = { 1,1,0, 1,0,1, 1,1,0, 1,0,1, 1,1,0 },
+    ["C"] = { 0,1,1, 1,0,0, 1,0,0, 1,0,0, 0,1,1 },
+    ["D"] = { 1,1,0, 1,0,1, 1,0,1, 1,0,1, 1,1,0 },
+    ["E"] = { 1,1,1, 1,0,0, 1,1,0, 1,0,0, 1,1,1 },
+    ["F"] = { 1,1,1, 1,0,0, 1,1,0, 1,0,0, 1,0,0 },
+    ["G"] = { 0,1,1, 1,0,0, 1,0,1, 1,0,1, 0,1,1 },
+    ["H"] = { 1,0,1, 1,0,1, 1,1,1, 1,0,1, 1,0,1 },
+    ["I"] = { 1,1,1, 0,1,0, 0,1,0, 0,1,0, 1,1,1 },
+    ["J"] = { 1,1,1, 0,1,0, 0,1,0, 1,1,0, 0,1,0 },
+    ["K"] = { 1,0,1, 1,0,1, 1,1,0, 1,0,1, 1,0,1 },
+    ["L"] = { 1,0,0, 1,0,0, 1,0,0, 1,0,0, 1,1,1 },
+    ["M"] = { 1,0,1, 1,1,1, 1,0,1, 1,0,1, 1,0,1 },
+    ["N"] = { 1,1,1, 1,0,1, 1,0,1, 1,0,1, 1,0,1 },
+    ["O"] = { 0,1,0, 1,0,1, 1,0,1, 1,0,1, 0,1,0 },
+    ["P"] = { 1,1,0, 1,0,1, 1,1,0, 1,0,0, 1,0,0 },
+    ["Q"] = { 0,1,0, 1,0,1, 1,0,1, 1,1,1, 0,1,1 },
+    ["R"] = { 1,1,0, 1,0,1, 1,1,0, 1,0,1, 1,0,1 },
+    ["S"] = { 0,1,1, 1,0,0, 0,1,0, 0,0,1, 1,1,0 },
+    ["T"] = { 1,1,1, 0,1,0, 0,1,0, 0,1,0, 0,1,0 },
+    ["U"] = { 1,0,1, 1,0,1, 1,0,1, 1,0,1, 1,1,1 },
+    ["V"] = { 1,0,1, 1,0,1, 1,0,1, 1,0,1, 0,1,0 },
+    ["W"] = { 1,0,1, 1,0,1, 1,0,1, 1,1,1, 1,0,1 },
+    ["X"] = { 1,0,1, 1,0,1, 0,1,0, 1,0,1, 1,0,1 },
+    ["Y"] = { 1,0,1, 1,0,1, 0,1,0, 0,1,0, 0,1,0 },
+    ["Z"] = { 1,1,1, 0,0,1, 0,1,0, 1,0,0, 1,1,1 }
+}
+
+function jvk.measureText(text, scale)
+    text = tostring(text or "")
+    scale = math.max(1, math.floor(tonumber(scale) or 1))
+    if #text == 0 then return 0, 5 * scale end
+    return (#text * 4 - 1) * scale, 5 * scale
+end
+
 -- ============================================================================
 -- 1. 3D Vector & 4x4 Matrix Math (jvk.vec3, jvk.mat4)
 -- ============================================================================
@@ -103,7 +173,6 @@ end
 
 jvk.vec3 = vec3
 
--- Row-major 4x4 Matrices (array of 16 numbers)
 local mat4 = {}
 
 function mat4.identity()
@@ -179,7 +248,7 @@ end
 
 function mat4.perspective(fovRad, aspect, near, far)
     fovRad = fovRad or (math.pi / 3)
-    aspect = (aspect and aspect > 0) and aspect or 1.5
+    aspect = (aspect and aspect > 0) and aspect or 1.0
     near = near or 0.1
     far = far or 100.0
     local f = 1.0 / math.tan(fovRad * 0.5)
@@ -238,12 +307,12 @@ function mesh.cube(size)
         { 1, 5, "0" }, { 2, 6, "0" }, { 3, 7, "0" }, { 4, 8, "0" }
     }
     local triangles = {
-        { 5, 6, 7, "3", "#" }, { 5, 7, 8, "3", "#" }, -- Front
-        { 2, 1, 4, "b", ":" }, { 2, 4, 3, "b", ":" }, -- Back
-        { 4, 8, 7, "9", "+" }, { 4, 7, 3, "9", "+" }, -- Top
-        { 1, 2, 6, "7", "." }, { 1, 6, 5, "7", "." }, -- Bottom
-        { 6, 2, 3, "5", "*" }, { 6, 3, 7, "5", "*" }, -- Right
-        { 1, 5, 8, "a", "=" }, { 1, 8, 4, "a", "=" }  -- Left
+        { 5, 6, 7, "3" }, { 5, 7, 8, "3" }, -- Front
+        { 2, 1, 4, "b" }, { 2, 4, 3, "b" }, -- Back
+        { 4, 8, 7, "9" }, { 4, 7, 3, "9" }, -- Top
+        { 1, 2, 6, "7" }, { 1, 6, 5, "7" }, -- Bottom
+        { 6, 2, 3, "5" }, { 6, 3, 7, "5" }, -- Right
+        { 1, 5, 8, "a" }, { 1, 8, 4, "a" }  -- Left
     }
     return { vertices = verts, edges = edges, triangles = triangles }
 end
@@ -262,10 +331,10 @@ function mesh.pyramid(size)
         { 2, 3, "1" }, { 3, 4, "1" }, { 4, 5, "1" }, { 5, 2, "1" }
     }
     local triangles = {
-        { 1, 5, 4, "4", "^" },
-        { 1, 4, 3, "1", "/" },
-        { 1, 3, 2, "e", "+" },
-        { 1, 2, 5, "6", "*" }
+        { 1, 5, 4, "4" },
+        { 1, 4, 3, "1" },
+        { 1, 3, 2, "e" },
+        { 1, 2, 5, "6" }
     }
     return { vertices = verts, edges = edges, triangles = triangles }
 end
@@ -296,9 +365,12 @@ function jvk.enumeratePhysicalDevices(instance)
     return {
         {
             _type = "VkPhysicalDevice",
-            name = "CC-jOS BIOS Framebuffer Adapter",
+            name = "CC-jOS BIOS Subpixel Framebuffer Adapter",
             width = fbInfo.width,
             height = fbInfo.height,
+            termWidth = fbInfo.termWidth,
+            termHeight = fbInfo.termHeight,
+            pixelwise = true,
             isColor = fbInfo.isColor
         }
     }
@@ -306,7 +378,6 @@ end
 
 function jvk.createDevice(physicalDevice, deviceCreateInfo)
     if type(physicalDevice) == "table" and physicalDevice._type == "VkInstance" then
-        -- Convenience overload: allow passing VkInstance directly
         local devs = jvk.enumeratePhysicalDevices(physicalDevice)
         physicalDevice = devs[1]
     end
@@ -336,13 +407,11 @@ function jvk.createSwapchain(device, swapchainCreateInfo)
     local w = swapchainCreateInfo.width or device.width
     local h = swapchainCreateInfo.height or device.height
 
-    local chars, fg, bg, depth = {}, {}, {}, {}
+    local pixels, depth = {}, {}
     for y = 1, h do
-        chars[y], fg[y], bg[y], depth[y] = {}, {}, {}, {}
+        pixels[y], depth[y] = {}, {}
         for x = 1, w do
-            chars[y][x] = " "
-            fg[y][x] = "0"
-            bg[y][x] = "f"
+            pixels[y][x] = "f"
             depth[y][x] = 1e9
         end
     end
@@ -352,10 +421,9 @@ function jvk.createSwapchain(device, swapchainCreateInfo)
         device = device,
         width = w,
         height = h,
-        chars = chars,
-        fg = fg,
-        bg = bg,
-        depth = depth
+        pixels = pixels,
+        depth = depth,
+        drawnTexts = {}
     }
 end
 
@@ -366,9 +434,6 @@ function jvk.createRenderPass(device, renderPassInfo)
         _type = "VkRenderPass",
         loadOp = renderPassInfo.loadOp or jvk.LOAD_OP_CLEAR,
         clearColor = normColor(renderPassInfo.clearColor, "f"),
-        clearTextColor = normColor(renderPassInfo.clearTextColor, "0"),
-        clearChar = (type(renderPassInfo.clearChar) == "string" and #renderPassInfo.clearChar > 0)
-            and renderPassInfo.clearChar:sub(1, 1) or " ",
         clearDepth = tonumber(renderPassInfo.clearDepth) or 1e9
     }
 end
@@ -382,15 +447,14 @@ function jvk.createGraphicsPipeline(device, pipelineInfo)
         polygonMode = pipelineInfo.polygonMode or jvk.POLYGON_MODE_LINE,
         cullMode = pipelineInfo.cullMode or jvk.CULL_MODE_NONE,
         depthTestEnable = (pipelineInfo.depthTestEnable ~= false),
-        defaultFg = normColor(pipelineInfo.defaultFg, "0"),
-        defaultBg = normColor(pipelineInfo.defaultBg, "f")
+        defaultColor = normColor(pipelineInfo.defaultFg or pipelineInfo.defaultColor, "0")
     }
 end
 
 -- ============================================================================
--- 4. Software Rasterizer Helpers (2D & 3D Depth-Tested Rasterization)
+-- 4. Pixelwise Software Rasterizer Helpers (2D & 3D Depth-Tested Rasterization)
 -- ============================================================================
-local function putPixel(sc, x, y, ch, fgCol, bgCol, z, depthTest)
+local function putPixel(sc, x, y, color, z, depthTest)
     x = math.floor(x + 0.5)
     y = math.floor(y + 0.5)
     if x < 1 or x > sc.width or y < 1 or y > sc.height then
@@ -402,18 +466,12 @@ local function putPixel(sc, x, y, ch, fgCol, bgCol, z, depthTest)
         end
         sc.depth[y][x] = z
     end
-    if ch ~= nil and #tostring(ch) > 0 then
-        sc.chars[y][x] = tostring(ch):sub(1, 1)
-    end
-    if fgCol ~= nil then
-        sc.fg[y][x] = normColor(fgCol, sc.fg[y][x])
-    end
-    if bgCol ~= nil then
-        sc.bg[y][x] = normColor(bgCol, sc.bg[y][x])
+    if color ~= nil then
+        sc.pixels[y][x] = normColor(color, sc.pixels[y][x])
     end
 end
 
-local function rasterizeLine(sc, x0, y0, z0, x1, y1, z1, ch, fgCol, bgCol, depthTest, clipRect)
+local function rasterizeLine(sc, x0, y0, z0, x1, y1, z1, color, depthTest, clipRect)
     x0, y0 = math.floor(x0 + 0.5), math.floor(y0 + 0.5)
     x1, y1 = math.floor(x1 + 0.5), math.floor(y1 + 0.5)
     local dx = math.abs(x1 - x0)
@@ -435,18 +493,12 @@ local function rasterizeLine(sc, x0, y0, z0, x1, y1, z1, ch, fgCol, bgCol, depth
             end
         end
         if insideClip then
-            putPixel(sc, x0, y0, ch, fgCol, bgCol, z, depthTest)
+            putPixel(sc, x0, y0, color, z, depthTest)
         end
         if x0 == x1 and y0 == y1 then break end
         local e2 = 2 * err
-        if e2 >= dy then
-            err = err + dy
-            x0 = x0 + sx
-        end
-        if e2 <= dx then
-            err = err + dx
-            y0 = y0 + sy
-        end
+        if e2 >= dy then err = err + dy; x0 = x0 + sx end
+        if e2 <= dx then err = err + dx; y0 = y0 + sy end
         stepIdx = stepIdx + 1
         if stepIdx > 1024 then break end
     end
@@ -456,7 +508,7 @@ local function edgeFunc(ax, ay, bx, by, px, py)
     return (px - ax) * (by - ay) - (py - ay) * (bx - ax)
 end
 
-local function rasterizeTriangleFilled(sc, p0, p1, p2, ch, fgCol, bgCol, depthTest, clipRect)
+local function rasterizeTriangleFilled(sc, p0, p1, p2, color, depthTest, clipRect)
     local minX = math.max(1, math.floor(math.min(p0.x, p1.x, p2.x)))
     local maxX = math.min(sc.width, math.ceil(math.max(p0.x, p1.x, p2.x)))
     local minY = math.max(1, math.floor(math.min(p0.y, p1.y, p2.y)))
@@ -480,9 +532,46 @@ local function rasterizeTriangleFilled(sc, p0, p1, p2, ch, fgCol, bgCol, depthTe
             local w2 = edgeFunc(p0.x, p0.y, p1.x, p1.y, px, py) / area
             if w0 >= -1e-4 and w1 >= -1e-4 and w2 >= -1e-4 then
                 local z = w0 * p0.z + w1 * p1.z + w2 * p2.z
-                putPixel(sc, x, y, ch, fgCol, bgCol, z, depthTest)
+                putPixel(sc, x, y, color, z, depthTest)
             end
         end
+    end
+end
+
+local function rasterizeBitmapText(sc, x, y, text, fgColor, bgColor, scale)
+    x = math.floor(tonumber(x) or 1)
+    y = math.floor(tonumber(y) or 1)
+    text = tostring(text or "")
+    scale = math.max(1, math.floor(tonumber(scale) or 1))
+    if #text == 0 then return end
+
+    local fgHex = normColor(fgColor, "0")
+    local bgHex = bgColor and normColor(bgColor, "f") or nil
+    sc.drawnTexts[#sc.drawnTexts + 1] = text
+
+    local curX = x
+    for i = 1, #text do
+        local ch = text:sub(i, i):upper()
+        local glyph = FONT_3X5[ch] or FONT_3X5["?"]
+        if bgHex then
+            for py = y, y + 5 * scale - 1 do
+                for px = curX, curX + 4 * scale - 1 do
+                    putPixel(sc, px, py, bgHex, nil, false)
+                end
+            end
+        end
+        for gy = 0, 4 do
+            for gx = 0, 2 do
+                if glyph[gy * 3 + gx + 1] == 1 then
+                    for sy = 0, scale - 1 do
+                        for sx = 0, scale - 1 do
+                            putPixel(sc, curX + gx * scale + sx, y + gy * scale + sy, fgHex, nil, false)
+                        end
+                    end
+                end
+            end
+        end
+        curX = curX + 4 * scale
     end
 end
 
@@ -569,30 +658,30 @@ function jvk.createCommandBuffer(device)
     end
 
     -- ------------------------------------------------------------------------
-    -- 2D Primitives
+    -- Pixelwise 2D Primitives
     -- ------------------------------------------------------------------------
-    function cmd:drawPixel(x, y, fgColor, bgColor, char)
+    function cmd:drawPixel(x, y, color)
         self.ops[#self.ops + 1] = {
             type = "DRAW_PIXEL",
-            x = x, y = y, fg = fgColor, bg = bgColor, char = char or " "
+            x = x, y = y, color = color
         }
         return self
     end
 
-    function cmd:drawLine2D(x0, y0, x1, y1, fgColor, bgColor, char)
+    function cmd:drawLine2D(x0, y0, x1, y1, color)
         self.ops[#self.ops + 1] = {
             type = "DRAW_LINE_2D",
             x0 = x0, y0 = y0, x1 = x1, y1 = y1,
-            fg = fgColor, bg = bgColor, char = char or "*"
+            color = color
         }
         return self
     end
 
-    function cmd:drawRect(x, y, w, h, bgColor, fgColor, char)
+    function cmd:drawRect(x, y, w, h, color)
         self.ops[#self.ops + 1] = {
             type = "DRAW_RECT",
             x = x, y = y, w = w, h = h,
-            bg = bgColor, fg = fgColor, char = char or " "
+            color = color
         }
         return self
     end
@@ -607,25 +696,27 @@ function jvk.createCommandBuffer(device)
         return self
     end
 
-    function cmd:drawText(x, y, text, fgColor, bgColor)
+    function cmd:drawText(x, y, text, fgColor, bgColor, scale)
         self.ops[#self.ops + 1] = {
             type = "DRAW_TEXT",
             x = x, y = y, text = tostring(text or ""),
-            fg = fgColor, bg = bgColor
+            fg = fgColor, bg = bgColor, scale = scale or 1
         }
         return self
     end
 
-    function cmd:drawTextCentered(y, text, fgColor, bgColor, regionX, regionW)
+    function cmd:drawTextCentered(y, text, fgColor, bgColor, regionX, regionW, scale)
         text = tostring(text or "")
+        scale = scale or 1
         regionX = regionX or 1
         regionW = regionW or self.device.width
-        local x = regionX + math.max(0, math.floor((regionW - #text) / 2))
-        return self:drawText(x, y, text, fgColor, bgColor)
+        local textW = jvk.measureText(text, scale)
+        local x = regionX + math.max(0, math.floor((regionW - textW) / 2))
+        return self:drawText(x, y, text, fgColor, bgColor, scale)
     end
 
     -- ------------------------------------------------------------------------
-    -- 2D UI Toolkit Commands
+    -- Pixelwise 2D UI Toolkit Commands
     -- ------------------------------------------------------------------------
     function cmd:uiWindow(spec)
         local x = spec.x or 1
@@ -636,22 +727,23 @@ function jvk.createCommandBuffer(device)
         local headerBg = spec.headerColor or "b"
         local titleFg = spec.titleColor or "0"
         local borderFg = spec.borderColor or "8"
+        local headerH = spec.headerHeight or 7
 
-        self:drawRect(x, y, w, h, bodyBg, "0", " ")
-        self:drawBorderBox(x, y, w, h, borderFg, bodyBg)
-        self:drawRect(x, y, w, 1, headerBg, titleFg, " ")
+        self:drawRect(x, y, w, h, bodyBg)
+        self:drawBorderBox(x, y, w, h, borderFg)
+        self:drawRect(x, y, w, headerH, headerBg)
         if spec.title then
-            self:drawTextCentered(y, " " .. tostring(spec.title) .. " ", titleFg, headerBg, x, w)
+            self:drawTextCentered(y + 1, tostring(spec.title), titleFg, headerBg, x + 2, w - 4, 1)
         end
         return self
     end
 
     function cmd:uiPanel(spec)
         local x, y = spec.x or 1, spec.y or 1
-        local w, h = spec.w or 10, spec.h or 5
-        local bg = spec.bg or "7"
+        local w, h = spec.w or 20, spec.h or 12
+        local bg = spec.bg or "f"
         local border = spec.borderColor or "8"
-        self:drawRect(x, y, w, h, bg, "0", " ")
+        self:drawRect(x, y, w, h, bg)
         if spec.border ~= false then
             self:drawBorderBox(x, y, w, h, border, bg, spec.title, spec.titleColor or "0")
         end
@@ -663,43 +755,48 @@ function jvk.createCommandBuffer(device)
         local text = tostring(spec.text or "")
         local fg = spec.fg or "0"
         local bg = spec.bg
+        local scale = spec.scale or 1
         if spec.align == "center" and spec.w then
-            return self:drawTextCentered(y, text, fg, bg, x, spec.w)
+            return self:drawTextCentered(y, text, fg, bg, x, spec.w, scale)
         elseif spec.align == "right" and spec.w then
-            local rx = x + math.max(0, spec.w - #text)
-            return self:drawText(rx, y, text, fg, bg)
+            local textW = jvk.measureText(text, scale)
+            local rx = x + math.max(0, spec.w - textW)
+            return self:drawText(rx, y, text, fg, bg, scale)
         end
-        return self:drawText(x, y, text, fg, bg)
+        return self:drawText(x, y, text, fg, bg, scale)
     end
 
     function cmd:uiButton(spec)
         local x, y = spec.x or 1, spec.y or 1
-        local label = tostring(spec.label or "Button")
-        local w = spec.w or (#label + 4)
-        local h = spec.h or 1
+        local label = tostring(spec.label or "BTN")
+        local textW = jvk.measureText(label, 1)
+        local w = spec.w or (textW + 6)
+        local h = spec.h or 7
         local bg = spec.active and (spec.activeBg or "5") or (spec.bg or "9")
-        local fg = spec.fg or "f"
-        self:drawRect(x, y, w, h, bg, fg, " ")
-        local ty = y + math.floor((h - 1) / 2)
-        self:drawTextCentered(ty, "[" .. label .. "]", fg, bg, x, w)
+        local fg = spec.fg or "0"
+        self:drawRect(x, y, w, h, bg)
+        local ty = y + math.max(0, math.floor((h - 5) / 2))
+        self:drawTextCentered(ty, label, fg, bg, x, w, 1)
         return self
     end
 
     function cmd:uiProgressBar(spec)
         local x, y = spec.x or 1, spec.y or 1
-        local w = spec.w or 20
+        local w = spec.w or 30
+        local h = spec.h or 7
         local progress = math.max(0, math.min(1, tonumber(spec.progress) or 0))
         local filled = math.floor(w * progress + 0.5)
         local fillBg = spec.fillBg or "5"
         local emptyBg = spec.emptyBg or "7"
         if filled > 0 then
-            self:drawRect(x, y, filled, 1, fillBg, "0", " ")
+            self:drawRect(x, y, filled, h, fillBg)
         end
         if filled < w then
-            self:drawRect(x + filled, y, w - filled, 1, emptyBg, "0", " ")
+            self:drawRect(x + filled, y, w - filled, h, emptyBg)
         end
         if spec.label then
-            self:drawTextCentered(y, tostring(spec.label), spec.fg or "0", nil, x, w)
+            local ty = y + math.max(0, math.floor((h - 5) / 2))
+            self:drawTextCentered(ty, tostring(spec.label), spec.fg or "0", nil, x, w, 1)
         end
         return self
     end
@@ -707,20 +804,20 @@ function jvk.createCommandBuffer(device)
     -- ------------------------------------------------------------------------
     -- 3D Rendering & 3D UI Viewport Commands
     -- ------------------------------------------------------------------------
-    function cmd:drawLine3D(v0, v1, fgColor, bgColor, char)
+    function cmd:drawLine3D(v0, v1, color)
         self.ops[#self.ops + 1] = {
             type = "DRAW_LINE_3D",
             v0 = v0, v1 = v1,
-            fg = fgColor, bg = bgColor, char = char or "*"
+            color = color
         }
         return self
     end
 
-    function cmd:drawTriangle3D(v0, v1, v2, fgColor, bgColor, char)
+    function cmd:drawTriangle3D(v0, v1, v2, color)
         self.ops[#self.ops + 1] = {
             type = "DRAW_TRIANGLE_3D",
             v0 = v0, v1 = v1, v2 = v2,
-            fg = fgColor, bg = bgColor, char = char or "#"
+            color = color
         }
         return self
     end
@@ -736,17 +833,20 @@ function jvk.createCommandBuffer(device)
 
     function cmd:uiViewport3D(spec)
         local x, y = spec.x or 1, spec.y or 1
-        local w, h = spec.w or 20, spec.h or 10
+        local w, h = spec.w or 40, spec.h or 30
         local bg = spec.bg or "f"
         local border = spec.borderColor or "9"
-        self:drawRect(x, y, w, h, bg, "0", " ")
+        self:drawRect(x, y, w, h, bg)
         self:drawBorderBox(x, y, w, h, border, bg, spec.title, spec.titleColor or "0")
 
-        local innerX, innerY = x + 1, y + 1
-        local innerW, innerH = math.max(1, w - 2), math.max(1, h - 2)
+        local innerX = x + 2
+        local innerY = y + (spec.title and 7 or 2)
+        local innerW = math.max(2, w - 4)
+        local innerH = math.max(2, h - (spec.title and 9 or 4))
         self:setViewport({ x = innerX, y = innerY, width = innerW, height = innerH })
         if type(spec.render) == "function" then
-            local aspect = (innerW / math.max(1, innerH)) * 0.65
+            -- In CC:Tweaked 2x3 teletext mode, each sub-pixel is a 1:1 square
+            local aspect = innerW / math.max(1, innerH)
             spec.render(self, aspect, innerW, innerH)
         end
         self:setViewport({ x = 1, y = 1, width = self.device.width, height = self.device.height })
@@ -791,8 +891,7 @@ local function executeCommandBuffer(cmd)
     local pushConst = {
         mvp = mat4.identity(),
         fg = "0",
-        bg = nil,
-        char = "*"
+        color = "0"
     }
 
     for i = 1, #cmd.ops do
@@ -803,15 +902,12 @@ local function executeCommandBuffer(cmd)
             activeSwapchain = op.swapchain
             local rp = op.renderPass
             if rp.loadOp == jvk.LOAD_OP_CLEAR then
+                activeSwapchain.drawnTexts = {}
                 for y = 1, activeSwapchain.height do
-                    local cRow = activeSwapchain.chars[y]
-                    local fRow = activeSwapchain.fg[y]
-                    local bRow = activeSwapchain.bg[y]
+                    local pRow = activeSwapchain.pixels[y]
                     local dRow = activeSwapchain.depth[y]
                     for x = 1, activeSwapchain.width do
-                        cRow[x] = rp.clearChar
-                        fRow[x] = rp.clearTextColor
-                        bRow[x] = rp.clearColor
+                        pRow[x] = rp.clearColor
                         dRow[x] = rp.clearDepth
                     end
                 end
@@ -831,10 +927,10 @@ local function executeCommandBuffer(cmd)
         elseif activeSwapchain then
             local sc = activeSwapchain
             if t == "DRAW_PIXEL" then
-                putPixel(sc, op.x, op.y, op.char, op.fg, op.bg, nil, false)
+                putPixel(sc, op.x, op.y, op.color, nil, false)
 
             elseif t == "DRAW_LINE_2D" then
-                rasterizeLine(sc, op.x0, op.y0, 0, op.x1, op.y1, 0, op.char, op.fg, op.bg, false)
+                rasterizeLine(sc, op.x0, op.y0, 0, op.x1, op.y1, 0, op.color, false)
 
             elseif t == "DRAW_RECT" then
                 local x0 = math.max(1, math.floor(op.x))
@@ -843,7 +939,7 @@ local function executeCommandBuffer(cmd)
                 local y1 = math.min(sc.height, math.floor(op.y + op.h - 1))
                 for py = y0, y1 do
                     for px = x0, x1 do
-                        putPixel(sc, px, py, op.char, op.fg, op.bg, nil, false)
+                        putPixel(sc, px, py, op.color, nil, false)
                     end
                 end
 
@@ -852,42 +948,21 @@ local function executeCommandBuffer(cmd)
                 local y0 = math.floor(op.y)
                 local x1 = x0 + math.floor(op.w) - 1
                 local y1 = y0 + math.floor(op.h) - 1
-                local bFg = op.borderColor or "8"
-                local bBg = op.bg
-                for px = x0 + 1, x1 - 1 do
-                    putPixel(sc, px, y0, "-", bFg, bBg, nil, false)
-                    putPixel(sc, px, y1, "-", bFg, bBg, nil, false)
+                local bCol = op.borderColor or "8"
+                for px = x0, x1 do
+                    putPixel(sc, px, y0, bCol, nil, false)
+                    putPixel(sc, px, y1, bCol, nil, false)
                 end
-                for py = y0 + 1, y1 - 1 do
-                    putPixel(sc, x0, py, "|", bFg, bBg, nil, false)
-                    putPixel(sc, x1, py, "|", bFg, bBg, nil, false)
+                for py = y0, y1 do
+                    putPixel(sc, x0, py, bCol, nil, false)
+                    putPixel(sc, x1, py, bCol, nil, false)
                 end
-                putPixel(sc, x0, y0, "+", bFg, bBg, nil, false)
-                putPixel(sc, x1, y0, "+", bFg, bBg, nil, false)
-                putPixel(sc, x0, y1, "+", bFg, bBg, nil, false)
-                putPixel(sc, x1, y1, "+", bFg, bBg, nil, false)
                 if op.title and #tostring(op.title) > 0 then
-                    local titleStr = " " .. tostring(op.title) .. " "
-                    local tx = x0 + 2
-                    for ti = 1, #titleStr do
-                        if tx + ti - 1 < x1 then
-                            putPixel(sc, tx + ti - 1, y0, titleStr:sub(ti, ti), op.titleColor or "0", bBg, nil, false)
-                        end
-                    end
+                    rasterizeBitmapText(sc, x0 + 3, y0 + 2, tostring(op.title), op.titleColor or bCol, op.bg, 1)
                 end
 
             elseif t == "DRAW_TEXT" then
-                local y = math.floor(op.y)
-                local x = math.floor(op.x)
-                local str = op.text
-                if y >= 1 and y <= sc.height then
-                    for si = 1, #str do
-                        local cx = x + si - 1
-                        if cx >= 1 and cx <= sc.width then
-                            putPixel(sc, cx, y, str:sub(si, si), op.fg, op.bg, nil, false)
-                        end
-                    end
-                end
+                rasterizeBitmapText(sc, op.x, op.y, op.text, op.fg, op.bg, op.scale)
 
             elseif t == "DRAW_LINE_3D" then
                 local mvp = pushConst.mvp or mat4.identity()
@@ -900,9 +975,7 @@ local function executeCommandBuffer(cmd)
                     }
                     rasterizeLine(
                         sc, p0.x, p0.y, p0.z, p1.x, p1.y, p1.z,
-                        op.char or pushConst.char or "*",
-                        op.fg or pushConst.fg or "0",
-                        op.bg or pushConst.bg,
+                        op.color or pushConst.fg or pushConst.color or "0",
                         activePipeline.depthTestEnable,
                         clip
                     )
@@ -921,15 +994,13 @@ local function executeCommandBuffer(cmd)
                             x = activeViewport.x, y = activeViewport.y,
                             w = activeViewport.width, h = activeViewport.height
                         }
-                        local ch = op.char or pushConst.char or "#"
-                        local fg = op.fg or pushConst.fg or "0"
-                        local bg = op.bg or pushConst.bg
+                        local col = op.color or pushConst.fg or pushConst.color or "0"
                         if activePipeline.polygonMode == jvk.POLYGON_MODE_FILL then
-                            rasterizeTriangleFilled(sc, p0, p1, p2, ch, fg, bg, activePipeline.depthTestEnable, clip)
+                            rasterizeTriangleFilled(sc, p0, p1, p2, col, activePipeline.depthTestEnable, clip)
                         else
-                            rasterizeLine(sc, p0.x, p0.y, p0.z, p1.x, p1.y, p1.z, ch, fg, bg, activePipeline.depthTestEnable, clip)
-                            rasterizeLine(sc, p1.x, p1.y, p1.z, p2.x, p2.y, p2.z, ch, fg, bg, activePipeline.depthTestEnable, clip)
-                            rasterizeLine(sc, p2.x, p2.y, p2.z, p0.x, p0.y, p0.z, ch, fg, bg, activePipeline.depthTestEnable, clip)
+                            rasterizeLine(sc, p0.x, p0.y, p0.z, p1.x, p1.y, p1.z, col, activePipeline.depthTestEnable, clip)
+                            rasterizeLine(sc, p1.x, p1.y, p1.z, p2.x, p2.y, p2.z, col, activePipeline.depthTestEnable, clip)
+                            rasterizeLine(sc, p2.x, p2.y, p2.z, p0.x, p0.y, p0.z, col, activePipeline.depthTestEnable, clip)
                         end
                     end
                 end
@@ -951,8 +1022,7 @@ local function executeCommandBuffer(cmd)
                             local area = edgeFunc(p0.x, p0.y, p1.x, p1.y, p2.x, p2.y)
                             if not (activePipeline.cullMode == jvk.CULL_MODE_BACK and area < 0) then
                                 local col = tri[4] or op.opts.fg or pushConst.fg or "9"
-                                local ch = tri[5] or op.opts.char or "#"
-                                rasterizeTriangleFilled(sc, p0, p1, p2, ch, col, op.opts.bg or col, activePipeline.depthTestEnable, clip)
+                                rasterizeTriangleFilled(sc, p0, p1, p2, col, activePipeline.depthTestEnable, clip)
                             end
                         end
                     end
@@ -963,8 +1033,7 @@ local function executeCommandBuffer(cmd)
                         local p1 = projectVertex(mvp, activeViewport, m.vertices[edge[2]])
                         if p0 and p1 then
                             local col = edge[3] or op.opts.fg or pushConst.fg or "9"
-                            local ch = op.opts.char or pushConst.char or "*"
-                            rasterizeLine(sc, p0.x, p0.y, p0.z, p1.x, p1.y, p1.z, ch, col, op.opts.bg, activePipeline.depthTestEnable, clip)
+                            rasterizeLine(sc, p0.x, p0.y, p0.z, p1.x, p1.y, p1.z, col, activePipeline.depthTestEnable, clip)
                         end
                     end
                 end
@@ -989,15 +1058,21 @@ function jvk.queueSubmit(queue, commandBuffers)
     end
 
     if lastSwapchain then
-        local batch = {}
+        local batch = {
+            { op = "clear", bg = "f" }
+        }
         for y = 1, lastSwapchain.height do
             batch[#batch + 1] = {
-                op = "blit",
+                op = "blitPixels",
                 x = 1,
                 y = y,
-                text = table.concat(lastSwapchain.chars[y]),
-                fg = table.concat(lastSwapchain.fg[y]),
-                bg = table.concat(lastSwapchain.bg[y])
+                pixels = table.concat(lastSwapchain.pixels[y])
+            }
+        end
+        for i = 1, #lastSwapchain.drawnTexts do
+            batch[#batch + 1] = {
+                op = "recordText",
+                text = lastSwapchain.drawnTexts[i]
             }
         end
         local ok, err = syscall("fb.submitBatch", batch)
